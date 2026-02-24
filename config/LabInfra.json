@@ -12,6 +12,12 @@
     "IP": "10.8.230.221"
   },
 
+    ,
+  "WAC": {
+    "Port": 6516,
+    "MsiUrl": "https://aka.ms/WACDownload"
+  },
+
   "iDRAC": {
     "Node1": "10.8.230.84",
     "Node2": "10.8.230.86"
@@ -36,3 +42,4 @@
     "VolumeCount": 2
   }
 }
+
