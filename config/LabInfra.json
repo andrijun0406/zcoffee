@@ -1,0 +1,38 @@
+{
+  "DomainName": "zcoffe.com",
+  "DomainNetbios": "ZCOFFE",
+
+  "DC": {
+    "Name": "ADJUMP01",
+    "IP": "10.8.230.88"
+  },
+
+  "WACGW": {
+    "Name": "WACGW01",
+    "IP": "10.8.230.221"
+  },
+
+  "iDRAC": {
+    "Node1": "10.8.230.84",
+    "Node2": "10.8.230.86"
+  },
+
+  "DnsForwarders": [
+    "8.8.8.8",
+    "1.1.1.1"
+  ],
+
+  "S2DCluster": {
+    "Name": "S2D-CLUS01",
+    "IP": "10.8.230.141",
+    "Nodes": [
+      "R650-1",
+      "R650-2"
+    ],
+    "MgmtAdapterName": "Ethernet0",
+    "StorageAdapterNames": [ "Ethernet1", "Ethernet2" ],
+    "WitnessShare": "\\\\ADJUMP01\\QuorumWitness$",
+    "VolumeSizeTB": 5.1,
+    "VolumeCount": 2
+  }
+}
