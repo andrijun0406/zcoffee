@@ -3,8 +3,8 @@
 End-to-end lab automation for a **Windows Server 2025** switchless **S2D** cluster on **Dell PowerEdge R650**, aligned with:
 
 - [**Windows Server 2025 Deployment and Operations Guide with Switchless Networking** (Dell InfoHub)](https://infohub.delltechnologies.com/en-us/t/windows-server-2025-deployment-and-operations-guide-with-switchless-networking/)
-- **Dell Azure HCI / Windows HCI support matrix for 14G–15G** (firmware & driver alignment)  
-  https://dell.github.io/azurestack-docs/docs/hci/supportmatrix/2512/14g-15g_hci/
+- [**Dell Azure HCI / Windows HCI support matrix for 14G–15G** (firmware & driver alignment)] (https://dell.github.io/azurestack-docs/docs/hci/supportmatrix/2512/14g-15g_hci/)
+  
 
 The lab topology is designed to be a repeatable foundation for a **nested Azure Local / Azure Stack HCI** environment.
 
