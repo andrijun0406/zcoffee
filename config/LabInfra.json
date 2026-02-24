@@ -12,7 +12,6 @@
     "IP": "10.8.230.221"
   },
 
-    ,
   "WAC": {
     "Port": 6516,
     "MsiUrl": "https://aka.ms/WACDownload"
