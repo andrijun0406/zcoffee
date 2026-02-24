@@ -94,4 +94,4 @@ Write-Host ""
 Write-Host "WAC should now be available at:" -ForegroundColor Yellow
 Write-Host "    https://$hostname`:$wacPort/" -ForegroundColor Yellow
 Write-Host ""
-'@ | Set-Content C:\LabInfra\scripts\05-Install-WAC.ps1 -Encoding UTF8
+'@ | Set-Content C:\LabInfra\scripts\04-Install-WAC.ps1 -Encoding UTF8
