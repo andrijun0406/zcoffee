@@ -6,7 +6,7 @@ End-to-end lab automation for a **Windows Server 2025** switchless **S2D** clust
 - [**Dell Azure HCI / Windows HCI support matrix for 14G–15G** (firmware & driver alignment)](https://dell.github.io/azurestack-docs/docs/hci/supportmatrix/2512/14g-15g_hci/)
   
 
-The lab topology is designed to be a repeatable foundation for a **nested Azure Local / Azure Stack HCI** environment.
+The lab topology is designed to be a repeatable foundation for a **nested Azure Local** environment.
 
 ---
 
