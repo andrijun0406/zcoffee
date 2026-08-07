@@ -26,3 +26,14 @@
 - Apply updates
 - Configure monitoring + demo scenarios
 - Document issues in `docs/troubleshooting.md`
+
+## Local Admin Credentials
+
+For cluster deployment, a local administrator account is required.
+
+- **Username** → See private runbook (OneNote master prompt)
+- **Password** → See private runbook (OneNote master prompt)
+
+> ⚠️ Credentials are intentionally excluded from this public repo.  
+> Refer to the private OneNote master prompt for the actual values.
+

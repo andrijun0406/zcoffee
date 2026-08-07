@@ -1,0 +1,106 @@
+{
+  "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentParameters.json#",
+  "contentVersion": "1.0.0.0",
+  "parameters": {
+    "deploymentMode": { "value": "Validate" },
+    "keyVaultName": { "value": "azljkt01kv" },
+    "createNewKeyVault": { "value": true },
+    "softDeleteRetentionDays": { "value": 30 },
+    "diagnosticStorageAccountName": { "value": "azljkt01diag" },
+    "logsRetentionInDays": { "value": 30 },
+    "storageAccountType": { "value": "Standard_LRS" },
+    "clusterName": { "value": "azl-jkt-01-clu" },
+    "location": { "value": "southeastasia" },
+    "tenantId": { "value": "2fab734c-3581-4c94-8c73-8f6dbee0ab86" },
+    "witnessType": { "value": "Cloud" },
+    "clusterWitnessStorageAccountName": { "value": "azljkt01wit" },
+    "localAdminUserName": { "value": "REPLACE_WITH_LOCAL_ADMIN_USERNAME" },
+    "localAdminPassword": { "value": null },
+    "hciResourceProviderObjectID": { "value": "899dec4f-e542-493b-8e58-ac50e666ffe7" },
+    "arcNodeResourceIds": {
+      "value": [
+        "/subscriptions/859c4879-999f-4cd5-a9bb-df171e8d1ad8/resourceGroups/azljkt01rg/providers/Microsoft.HybridCompute/machines/azljkt01n1",
+        "/subscriptions/859c4879-999f-4cd5-a9bb-df171e8d1ad8/resourceGroups/azljkt01rg/providers/Microsoft.HybridCompute/machines/azljkt01n2"
+      ]
+    },
+    "namingPrefix": { "value": "hci" },
+    "identityProvider": { "value": "LocalIdentity" },
+    "securityLevel": { "value": "Recommended" },
+    "driftControlEnforced": { "value": true },
+    "credentialGuardEnforced": { "value": true },
+    "smbSigningEnforced": { "value": true },
+    "smbClusterEncryption": { "value": false },
+    "bitlockerBootVolume": { "value": true },
+    "bitlockerDataVolumes": { "value": true },
+    "wdacEnforced": { "value": true },
+    "streamingDataClient": { "value": true },
+    "euLocation": { "value": false },
+    "episodicDataUpload": { "value": true },
+    "configurationMode": { "value": "Express" },
+    "subnetMask": { "value": "255.255.255.0" },
+    "defaultGateway": { "value": "10.8.230.1" },
+    "startingIPAddress": { "value": "10.8.230.242" },
+    "endingIPAddress": { "value": "10.8.230.247" },
+    "dnsServers": { "value": ["10.8.230.248"] },
+    "useDhcp": { "value": false },
+    "dnsServerConfig": { "value": "UseForwarder" },
+    "dnsZones": {
+      "value": [
+        {
+          "dnsZoneName": "zcoffee.com",
+          "dnsForwarder": ["10.8.230.248"]
+        }
+      ]
+    },
+    "physicalNodesSettings": {
+      "value": [
+        { "name": "azljkt01n1", "ipv4Address": "10.8.230.222" },
+        { "name": "azljkt01n2", "ipv4Address": "10.8.230.232" }
+      ]
+    },
+    "networkingType": { "value": "switchlessMultiServerDeployment" },
+    "networkingPattern": { "value": "convergedManagementCompute" },
+    "intentList": {
+      "value": [
+        {
+          "name": "MgmtCompute",
+          "trafficType": ["Management", "Compute"],
+          "adapter": ["Port 1", "Port 2"],
+          "overrideVirtualSwitchConfiguration": false,
+          "virtualSwitchConfigurationOverrides": { "enableIov": "", "loadBalancingAlgorithm": "" },
+          "overrideQosPolicy": false,
+          "qosPolicyOverrides": { "priorityValue8021Action_Cluster": "", "priorityValue8021Action_SMB": "", "bandwidthPercentage_SMB": "" },
+          "overrideAdapterProperty": true,
+          "adapterPropertyOverrides": { "jumboPacket": "1514", "networkDirect": "Disabled", "networkDirectTechnology": "" }
+        },
+        {
+          "name": "Storage",
+          "trafficType": ["Storage"],
+          "adapter": ["Port 3", "Port 4"],
+          "overrideVirtualSwitchConfiguration": false,
+          "virtualSwitchConfigurationOverrides": { "enableIov": "", "loadBalancingAlgorithm": "" },
+          "overrideQosPolicy": false,
+          "qosPolicyOverrides": { "priorityValue8021Action_Cluster": "", "priorityValue8021Action_SMB": "", "bandwidthPercentage_SMB": "" },
+          "overrideAdapterProperty": true,
+          "adapterPropertyOverrides": { "jumboPacket": "9014", "networkDirect": "Enabled", "networkDirectTechnology": "RoCEv2" }
+        }
+      ]
+    },
+    "storageNetworkList": {
+      "value": [
+        { "name": "StorageNetwork1", "networkAdapterName": "Port 3", "vlanId": "711" },
+        { "name": "StorageNetwork2", "networkAdapterName": "Port 4", "vlanId": "712" }
+      ]
+    },
+    "storageConnectivitySwitchless": { "value": true },
+    "enableStorageAutoIp": { "value": true },
+    "customLocation": { "value": "azljkt01loc" },
+    "sbeVersion": { "value": "" },
+    "sbeFamily": { "value": "" },
+    "sbePublisher": { "value": "" },
+    "sbeManifestSource": { "value": "" },
+    "sbeManifestCreationDate": { "value": "" },
+    "partnerProperties": { "value": [] },
+    "partnerCredentiallist": { "value": [] }
+  }
+}
