@@ -1,39 +1,75 @@
+# Deployment Guide
+
+## Pre‑Deployment
+
+### Prerequisites
+- Register Partner Admin Link (PAL) for Azure solutions.
+- Verify cabling instructions for switchless design (25GbE back‑to‑back for storage, 10GbE for management/compute).
+- Confirm VLANs and IP layout:
+  - VLAN 230 → Management/Compute (10.8.230.0/24)
+  - VLAN 711 → StorageNetwork1 (Port 3)
+  - VLAN 712 → StorageNetwork2 (Port 4)
+
+### Firmware & Software Compliance
+- Validate against Dell Support Matrix (14G–15G HCI).
+- Document BIOS, NIC, and driver versions in private runbook.
+- Ensure all nodes are updated before OS deployment.
 
 ---
 
-### `docs/deployment-guide.md`
-```markdown
-# Deployment Guide
+## Operating System Deployment
 
-## Pre-Deployment
-- Verify hardware specs
-- Cabling: 25GbE Twinax (storage), 10GbE (compute/management)
-- VLAN 230, subnet 10.8.230.0/24
-- Validate firmware/driver/BIOS against [Dell Support Matrix](https://dell.github.io/azurestack-docs/docs/hci/supportmatrix/2606/14g-15g_hci)
+### Golden Image ISO
+- Use Dell‑provided Azure Local golden‑image ISO for baseline OS install.
+- Mount ISO via iDRAC Virtual Media from management endpoint.
+- Apply unattended answer file for automated installation.
 
-## Deployment
-- Install Azure Stack HCI OS
-- Configure Storage Spaces Direct
-- Run automation scripts:
-  - `init-cluster.ps1`
-  - `configure-network.ps1`
-  - `deploy-s2d.ps1`
-- Apply ARM templates:
-  - `base-infra.json`
-  - `keyvault.json`
+### Host Networking
+- Identify NICs for management/compute traffic (`Port 1`, `Port 2`).
+- Identify NICs for storage traffic (`Port 3`, `Port 4`).
+- Configure IP addresses:
+  - Mgmt/Compute → 10.8.230.242–247
+  - Storage → Auto IP assignment enabled
+- Apply VLAN IDs (711, 712) for storage networks.
+- Configure firewall per Dell recommendations.
 
-## Post-Deployment
-- Apply updates
-- Configure monitoring + demo scenarios
-- Document issues in `docs/troubleshooting.md`
+---
 
-## Local Admin Credentials
+## Node Preparation
 
-For cluster deployment, a local administrator account is required.
+### Hostname Assignment
+- Rename nodes to match naming convention:
+  - `azljkt01n1`
+  - `azljkt01n2`
+- Reboot after hostname change.
 
-- **Username** → See private runbook (OneNote master prompt)
-- **Password** → See private runbook (OneNote master prompt)
+### IP Configuration
+- Assign static IPs for management/compute:
+  - `azljkt01n1` → 10.8.230.222
+  - `azljkt01n2` → 10.8.230.232
+- Verify DNS forwarder (10.8.230.248).
 
-> ⚠️ Credentials are intentionally excluded from this public repo.  
-> Refer to the private OneNote master prompt for the actual values.
+### Security Baseline
+- Enable BitLocker (boot + data volumes).
+- Enforce Credential Guard, WDAC, SMB signing.
+- Configure drift control enforcement.
 
+---
+
+## Post‑Deployment
+
+### Updates & Maintenance
+- Apply SBE packages for Azure Local updates.
+- Document GPU integration or optional features if used.
+
+### Monitoring & Lifecycle
+- Use Dell OpenManage Integration with Windows Admin Center (WAC).
+- Monitor compliance with Dell Support Matrix.
+- Reference private runbook for credentials and sensitive values.
+
+---
+
+## Best Practice
+- Keep sensitive values (localAdminUsername, localAdminPassword, subscription IDs) in private OneNote runbook.
+- Public repo should reference Dell docs and conventions, but never expose credentials.
+- Cross‑reference: *“See private runbook for credentials and firmware versions.”*
