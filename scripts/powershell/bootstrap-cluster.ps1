@@ -11,7 +11,8 @@ param(
     [string]$ISOFile,
     [int]$HttpPort = 8080,
     [string]$MgmtGateway = "10.8.230.1",
-    [string]$DnsServer = "10.8.230.248"
+    [string]$DnsServer = "10.8.230.248",
+    [string]$RACADMPath
 )
 
 if (-not $PSBoundParameters.ContainsKey('iDRACPassword')) {
@@ -26,25 +27,58 @@ $secureiDRACPassword = switch ($iDRACPassword) {
 }
 
 function Ensure-RACADMInstalled {
+    param([string]$PathHint)
+
+    if ($PathHint) {
+        $hintCommand = Get-Command $PathHint -ErrorAction SilentlyContinue
+        if ($hintCommand) {
+            return $hintCommand.Source
+        }
+        if (Test-Path $PathHint) {
+            return $PathHint
+        }
+        Write-Host "WARNING: Provided RACADM path '$PathHint' was not found. Falling back to PATH and default locations." -ForegroundColor Yellow
+    }
+
     $candidates = @('racadm', 'racdm')
     $installed = $candidates | ForEach-Object { Get-Command $_ -ErrorAction SilentlyContinue } | Where-Object { $_ }
-    if (-not $installed) {
-        Write-Host "ERROR: Neither 'racadm' nor 'racdm' was found in your PATH."
-        Write-Host "Download Dell iDRAC Tools for Microsoft Windows Server, v11.3.0.0:" -ForegroundColor Yellow
-        Write-Host "https://www.dell.com/support/home/en-id/drivers/driversdetails?driverId=W3M24" -ForegroundColor Cyan
-        Write-Host "After installing, reopen PowerShell and rerun this script."
-        throw "RACADM/iDRAC tool is required."
+    if ($installed) {
+        return $installed[0].Source
     }
-    return $installed[0].Source
+
+    $defaultPaths = @(
+        'C:\Program Files\Dell\SysMgt\iDRACTools\racadm.exe',
+        'C:\Program Files\Dell\SysMgt\iDRACTools\racadm\racdm.exe',
+        'C:\Program Files\Dell\SysMgt\iDRACTools\racadm\racadm.exe'
+    )
+    foreach ($path in $defaultPaths) {
+        if (Test-Path $path) {
+            return $path
+        }
+    }
+
+    Write-Host "ERROR: RACADM was not found on PATH or in the default Dell install location." -ForegroundColor Red
+    Write-Host "Download Dell iDRAC Tools for Microsoft Windows Server, v11.3.0.0:" -ForegroundColor Yellow
+    Write-Host "https://www.dell.com/support/home/en-id/drivers/driversdetails?driverId=W3M24" -ForegroundColor Cyan
+    Write-Host "After installing, reopen PowerShell and rerun this script."
+    throw "RACADM/iDRAC tool is required."
 }
 
-$racadmPath = Ensure-RACADMInstalled
-Write-Host "Found RACADM tool at $racadmPath"
+$racadmPath = Ensure-RACADMInstalled -PathHint $RACADMPath
+Write-Host "Using RACADM tool at $racadmPath"
 
 # Node definitions
 $nodes = @(
-    @{ Name = "azljkt01n1"; iDRACIP = "10.8.230.222"; MgmtIP = "10.8.230.222" },
-    #@{ Name = "azljkt01n2"; iDRACIP = "10.8.230.232"; MgmtIP = "10.8.230.232" }
+    @{ 
+        Name = "azljkt01n1"
+        iDRACIP = "10.8.230.222"
+        MgmtIP = "10.8.230.222"
+    }
+    #@{ 
+    #    Name = "azljkt01n2"
+    #    iDRACIP = "10.8.230.232"
+    #    MgmtIP = "10.8.230.232"
+    #}
 )
 
 # Step 0: Start local HTTP server to serve ISO
