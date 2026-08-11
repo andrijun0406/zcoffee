@@ -1,19 +1,14 @@
-<#
-.SYNOPSIS
-Automates OS deployment via iDRAC Virtual Media
-#>
-
 param(
     [string]$NodeIP,
-    [string]$iDRACUser = "root",
-    [string]$iDRACPassword = "REPLACE_WITH_SECURE_PASSWORD",
-    [string]$ISOPath = "C:\ISOs\AzureLocalGoldenImage.iso"
+    [string]$iDRACUser,
+    [string]$iDRACPassword,
+    [string]$ISOUrl
 )
 
-Write-Host "Mounting ISO to $NodeIP via iDRAC..."
+Write-Host "Mounting ISO to $NodeIP via RACADM..."
 
-# Example RACADM command (Dell iDRAC)
-# racadm -r $NodeIP -u $iDRACUser -p $iDRACPassword remoteimage -c -l $ISOPath
-# racadm -r $NodeIP -u $iDRACUser -p $iDRACPassword serveraction powercycle
+racadm -r $NodeIP -u $iDRACUser -p $iDRACPassword remoteimage -c -l $ISOUrl
+racadm -r $NodeIP -u $iDRACUser -p $iDRACPassword set iDRAC.ServerBoot.NextBootDevice VCD-DVD
+racadm -r $NodeIP -u $iDRACUser -p $iDRACPassword serveraction powercycle
 
 Write-Host "OS deployment initiated for $NodeIP"

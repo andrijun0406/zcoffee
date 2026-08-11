@@ -15,6 +15,27 @@
 - Document BIOS, NIC, and driver versions in private runbook.
 - Ensure all nodes are updated before OS deployment.
 
+## Bootstrap Requirements
+
+The bootstrap orchestration script (`bootstrap-cluster.ps1`) uses Python to serve the Golden Image ISO locally over HTTP.  
+
+### Prerequisite
+- **Python 3.x must be installed** on the management PC.
+- Ensure `python`, `python3`, or `py` is available in your system PATH.
+- Verify installation by running:
+python --version
+or
+py --version
+
+### Why Python?
+- The script starts a lightweight HTTP server (`python -m http.server`) to host the ISO from `LABINFRA/isos`.
+- RACADM mounts the ISO from this local HTTP endpoint to each node’s iDRAC.
+
+### Best Practice
+- Install the latest stable Python release for Windows (see [Python on Windows documentation](https://docs.python.org/3/using/windows.html)).
+- Keep ISO files excluded from GitHub via `.gitignore`.
+- Document ISO version and source in your private runbook.
+
 ---
 
 ## Operating System Deployment
@@ -23,6 +44,15 @@
 - Use Dell‑provided Azure Local golden‑image ISO for baseline OS install.
 - Mount ISO via iDRAC Virtual Media from management endpoint.
 - Apply unattended answer file for automated installation.
+
+### Golden Image Handling
+
+The Azure Local Golden Image ISO is required for OS deployment.  
+For security and size reasons, the ISO is **not stored in the GitHub repo**.
+
+### Storage Location
+- Place the ISO under your local lab infrastructure folder:
+LABINFRA/isos/AzureLocalGoldenImage.iso
 
 ### Host Networking
 - Identify NICs for management/compute traffic (`Port 1`, `Port 2`).

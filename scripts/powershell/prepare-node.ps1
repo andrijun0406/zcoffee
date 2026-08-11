@@ -6,7 +6,7 @@ Prepares node with hostname, firewall, and security baseline
 param(
     [string]$NewHostname,
     [string]$MgmtIP,
-    [string]$DnsServer = "10.8.230.248"
+    [string]$DnsServer = "10.8.230.51"
 )
 
 Write-Host "Renaming computer to $NewHostname..."
