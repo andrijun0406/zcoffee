@@ -25,6 +25,22 @@ $secureiDRACPassword = switch ($iDRACPassword) {
     default { throw "An iDRAC password is required. Provide one or enter it when prompted." }
 }
 
+function Ensure-RACADMInstalled {
+    $candidates = @('racadm', 'racdm')
+    $installed = $candidates | ForEach-Object { Get-Command $_ -ErrorAction SilentlyContinue } | Where-Object { $_ }
+    if (-not $installed) {
+        Write-Host "ERROR: Neither 'racadm' nor 'racdm' was found in your PATH."
+        Write-Host "Download Dell iDRAC Tools for Microsoft Windows Server, v11.3.0.0:" -ForegroundColor Yellow
+        Write-Host "https://www.dell.com/support/home/en-id/drivers/driversdetails?driverId=W3M24" -ForegroundColor Cyan
+        Write-Host "After installing, reopen PowerShell and rerun this script."
+        throw "RACADM/iDRAC tool is required."
+    }
+    return $installed[0].Source
+}
+
+$racadmPath = Ensure-RACADMInstalled
+Write-Host "Found RACADM tool at $racadmPath"
+
 # Node definitions
 $nodes = @(
     @{ Name = "azljkt01n1"; iDRACIP = "10.8.230.222"; MgmtIP = "10.8.230.222" },
@@ -75,7 +91,7 @@ foreach ($node in $nodes) {
     Write-Host "=== Bootstrapping $($node.Name) ==="
 
     # Step 1: OS Deployment (delegated to deploy-os.ps1)
-    .\deploy-os.ps1 -NodeIP $node.iDRACIP -iDRACUser $iDRACUser -iDRACPassword $secureiDRACPassword -ISOUrl $ISOUrl
+    .\deploy-os.ps1 -NodeIP $node.iDRACIP -iDRACUser $iDRACUser -iDRACPassword $secureiDRACPassword -ISOUrl $ISOUrl -RACADMPath $racadmPath
 
     # Step 2: Networking
     # .\configure-network.ps1 -MgmtIP $node.MgmtIP -MgmtGateway $MgmtGateway -MgmtSubnet "255.255.255.0" -StorageVlan1 "711" -StorageVlan2 "712"
