@@ -10,10 +10,23 @@ param(
     [object]$iDRACPassword,
     [string]$ISOFile,
     [int]$HttpPort = 8080,
+    [string]$HttpHost,
     [string]$MgmtGateway = "10.8.230.1",
-    [string]$DnsServer = "10.8.230.248",
+    [string]$DnsServer = "10.8.230.51",
     [string]$RACADMPath
 )
+
+function Ensure-RunningAsAdministrator {
+    $currentUser = [Security.Principal.WindowsIdentity]::GetCurrent()
+    $principal = New-Object Security.Principal.WindowsPrincipal($currentUser)
+    if (-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
+        Write-Host "ERROR: This script must be run with Administrator privileges." -ForegroundColor Red
+        Write-Host "Right-click PowerShell and select 'Run as Administrator', then rerun this script." -ForegroundColor Yellow
+        throw "Administrator privileges required."
+    }
+}
+
+Ensure-RunningAsAdministrator
 
 if (-not $PSBoundParameters.ContainsKey('iDRACPassword')) {
     Write-Host "Enter the iDRAC password for user '$iDRACUser':"
@@ -71,12 +84,12 @@ Write-Host "Using RACADM tool at $racadmPath"
 $nodes = @(
     @{ 
         Name = "azljkt01n1"
-        iDRACIP = "10.8.230.222"
+        iDRACIP = "10.8.230.84"
         MgmtIP = "10.8.230.222"
     }
     #@{ 
     #    Name = "azljkt01n2"
-    #    iDRACIP = "10.8.230.232"
+    #    iDRACIP = "10.8.230.86"
     #    MgmtIP = "10.8.230.232"
     #}
 )
@@ -109,16 +122,23 @@ if ($isoDirectory) {
         throw "Python is required to serve the ISO. Install Python and ensure 'py' or 'python' is available on PATH."
     }
 
-    $serverProcess = Start-Process -FilePath $pythonCommand -ArgumentList @('-m', 'http.server', $HttpPort, '--bind', '127.0.0.1') -WorkingDirectory $isoDirectory -PassThru -WindowStyle Minimized
+    $serverProcess = Start-Process -FilePath $pythonCommand -ArgumentList @('-m', 'http.server', $HttpPort, '--bind', '0.0.0.0') -WorkingDirectory $isoDirectory -PassThru -WindowStyle Minimized
     Start-Sleep -Seconds 2
 
-    $connection = Test-NetConnection -ComputerName 127.0.0.1 -Port $HttpPort -InformationLevel Quiet -WarningAction SilentlyContinue
+    $connection = Test-NetConnection -ComputerName 'localhost' -Port $HttpPort -InformationLevel Quiet -WarningAction SilentlyContinue
     if (-not $connection) {
         throw "The HTTP server did not start listening on port $HttpPort. Check Python installation and firewall settings."
     }
 }
 
-$ISOUrl = "http://127.0.0.1:$HttpPort/$(Split-Path $ISOFile -Leaf)"
+if (-not $HttpHost) {
+    $HttpHost = (Get-NetIPAddress -AddressFamily IPv4 | Where-Object { $_.IPAddress -notlike '127.*' -and $_.IPAddress -notlike '169.254.*' } | Select-Object -First 1 -ExpandProperty IPAddress)
+    if (-not $HttpHost) {
+        throw "Unable to determine a network-accessible HTTP host address. Provide -HttpHost explicitly."
+    }
+}
+
+$ISOUrl = "http://${HttpHost}:${HttpPort}/$(Split-Path $ISOFile -Leaf)"
 Write-Host "ISO available at $ISOUrl"
 
 foreach ($node in $nodes) {
