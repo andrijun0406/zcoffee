@@ -198,6 +198,60 @@ function Invoke-Step {
     }
 }
 
+# ---------------- Lab config (single source of truth) ----------------
+
+$script:LabConfigCache = $null
+
+function Import-LabConfig {
+    [CmdletBinding()]
+    param([string]$Path)
+
+    if ($script:LabConfigCache) { return $script:LabConfigCache }
+
+    if (-not $Path) {
+        $Path = Join-Path $PSScriptRoot 'lab-config.psd1'
+    }
+
+    if (-not (Test-Path $Path -PathType Leaf)) {
+        Write-Warn "lab-config.psd1 not found at $Path. Using built-in parameter defaults."
+        $script:LabConfigCache = @{}
+        return $script:LabConfigCache
+    }
+
+    $script:LabConfigCache = Import-PowerShellDataFile -Path $Path
+    return $script:LabConfigCache
+}
+
+function Resolve-Setting {
+    <#
+    Precedence: explicitly bound parameter > lab-config value > built-in default.
+      -Name      parameter name to check in $Bound
+      -Bound     the caller's $PSBoundParameters
+      -Current   the parameter's current value (built-in default if not bound)
+      -ConfigKey key to read from lab-config
+      -Config    the imported config hashtable
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$Name,
+        [Parameter(Mandatory)][hashtable]$Bound,
+        $Current,
+        [string]$ConfigKey,
+        [hashtable]$Config
+    )
+
+    if ($Bound.ContainsKey($Name)) { return $Current }
+
+    if ($ConfigKey -and $Config -and $Config.ContainsKey($ConfigKey)) {
+        $val = $Config[$ConfigKey]
+        if ($null -ne $val -and -not ($val -is [string] -and $val -eq '')) {
+            return $val
+        }
+    }
+
+    return $Current
+}
+
 # ---------------- Optional Windows Forms window ----------------
 
 function Initialize-GuiWindow {
