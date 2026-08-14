@@ -1,105 +1,120 @@
 # Deployment Guide
 
-## Pre‑Deployment
+This guide maps the six-stage automation to the Dell AX System for Azure Local (switchless networking) and Microsoft Azure Local deployment flow. Every stage uses the shared `ui-common.ps1` dashboard (colored steps, progress, warnings/errors, elapsed time, per-stage log under `logs/`, optional `-UseGui` window).
 
-### Prerequisites
-- Register Partner Admin Link (PAL) for Azure solutions.
-- Verify cabling instructions for switchless design (25GbE back‑to‑back for storage, 10GbE for management/compute).
-- Confirm VLANs and IP layout:
-  - VLAN 230 → Management/Compute (10.8.230.0/24)
-  - VLAN 711 → StorageNetwork1 (Port 3)
-  - VLAN 712 → StorageNetwork2 (Port 4)
+## Table of contents
 
-### Firmware & Software Compliance
-- Validate against Dell Support Matrix (14G–15G HCI).
-- Document BIOS, NIC, and driver versions in private runbook.
-- Ensure all nodes are updated before OS deployment.
+- [Supportability and scope](#supportability-and-scope)
+- [Pre-deployment](#pre-deployment)
+- [Configuration source of truth](#configuration-source-of-truth)
+- [Tooling prerequisites](#tooling-prerequisites)
+- [Stage 1 — OS deployment](#stage-1--os-deployment-01-deploy-osps1)
+- [Stage 2 — Host networking](#stage-2--host-networking-02-configure-networkps1)
+- [Stage 3 — Node preparation](#stage-3--node-preparation-03-prepare-nodeps1)
+- [Stage 4 — Azure Arc registration](#stage-4--azure-arc-registration-04-register-arcps1)
+- [Stage 5 — Azure Local deployment](#stage-5--azure-local-deployment-05-deploy-azure-localps1)
+- [Stage 6 — Cluster validation](#stage-6--cluster-validation-06-validate-clusterps1)
+- [Post-deployment](#post-deployment)
+- [Best practice](#best-practice)
 
-## Bootstrap Requirements
+## Supportability and scope
 
-The bootstrap orchestration script (`bootstrap-cluster.ps1`) uses Python to serve the Golden Image ISO locally over HTTP.  
+> [!WARNING]
+> Treat R650 as **lab-only** until Dell confirms the exact R650 support-matrix row (platform + NIC + firmware + OS + SBE). See [`lab-architecture.md`](./lab-architecture.md).
 
-### Prerequisite
-- **Python 3.x must be installed** on the management PC.
-- Ensure `python`, `python3`, or `py` is available in your system PATH.
-- Verify installation by running:
-python --version
-or
-py --version
+- Identity: Local Identity with Azure Key Vault (AD-less).
+- Storage: switchless, 2-node, dual 25GbE back-to-back.
 
-### Why Python?
-- The script starts a lightweight HTTP server (`python -m http.server`) to host the ISO from `LABINFRA/isos`.
-- RACADM mounts the ISO from this local HTTP endpoint to each node’s iDRAC.
+## Pre-deployment
 
-### Best Practice
-- Install the latest stable Python release for Windows (see [Python on Windows documentation](https://docs.python.org/3/using/windows.html)).
-- Keep ISO files excluded from GitHub via `.gitignore`.
-- Document ISO version and source in your private runbook.
+- Register a Partner Admin Link (PAL) for Azure solutions.
+- Verify cabling: 25GbE back-to-back for storage (Ports 3/4), 10GbE for management/compute (Ports 1/2).
+- Confirm VLAN/IP layout:
+    - VLAN 230 → Management/Compute (`10.8.230.0/24`)
+    - VLAN 711 → StorageNetwork1 (Port 3)
+    - VLAN 712 → StorageNetwork2 (Port 4)
+- Firmware/software compliance: validate against the Dell Support Matrix and record BIOS/NIC/driver/SBE versions in the private runbook. Update all nodes before OS deployment.
 
----
+## Configuration source of truth
 
-## Operating System Deployment
+> [!IMPORTANT]
+> All values (DNS, VLANs, gateway, cluster/resource names, node and iDRAC IPs, HTTP port, local admin) are defined once in `lab-config.psd1` and loaded by every stage. Passing a parameter overrides the config for that run. Compare `lab-config.psd1` with [`odin-config-report.md`](./odin-config-report.md) before deployment.
 
-### Golden Image ISO
-- Use Dell‑provided Azure Local golden‑image ISO for baseline OS install.
-- Mount ISO via iDRAC Virtual Media from management endpoint.
-- Apply unattended answer file for automated installation.
+## Tooling prerequisites
 
-### Golden Image Handling
+- Windows PowerShell 5.1+ or PowerShell 7+, run as Administrator.
+- Dell RACADM on PATH or via `-RACADMPath`.
+- Python 3.x on PATH (`py`, `python`, or `python3`) — used only to serve the Golden Image ISO over HTTP so RACADM can mount it to each iDRAC. Verify with `python --version` or `py --version`.
+- Azure CLI for Stage 5.
+- Keep the Golden Image ISO under `isos/` (gitignored). Never commit ISOs.
 
-The Azure Local Golden Image ISO is required for OS deployment.  
-For security and size reasons, the ISO is **not stored in the GitHub repo**.
+## Stage 1 — OS deployment (`01-deploy-os.ps1`)
 
-### Storage Location
-- Place the ISO under your local lab infrastructure folder:
-LABINFRA/isos/AzureLocalGoldenImage.iso
+Runs `preflight-os.ps1`, starts the ISO HTTP server bound to a reachable management IP, then calls `deploy-os.ps1` for each iDRAC.
 
-### Host Networking
-- Identify NICs for management/compute traffic (`Port 1`, `Port 2`).
-- Identify NICs for storage traffic (`Port 3`, `Port 4`).
-- Configure IP addresses:
-  - Mgmt/Compute → 10.8.230.242–247
-  - Storage → Auto IP assignment enabled
-- Apply VLAN IDs (711, 712) for storage networks.
-- Configure firewall per Dell recommendations.
+```powershell
+# Mount only (safe)
+.\bootstrap-cluster.ps1 -Stage 01-deploy-os -HttpHost 10.8.230.225 -NoCertWarn
 
----
+# Mount + one-time VCD-DVD boot + power-cycle, with GUI
+.\bootstrap-cluster.ps1 -Stage 01-deploy-os -HttpHost 10.8.230.225 `
+  -StartInstallation -NoCertWarn -UseGui
+```
 
-## Node Preparation
+> [!NOTE]
+> - The ISO server must bind to an IP both iDRACs can reach; loopback/wildcard is rejected.
+> - Prepare/clean the BOSS boot virtual disk in iDRAC before installing.
+> - Use `-ExpectedISOHash <sha256>` to enforce image integrity.
 
-### Hostname Assignment
-- Rename nodes to match naming convention:
-  - `azljkt01n1`
-  - `azljkt01n2`
-- Reboot after hostname change.
+## Stage 2 — Host networking (`02-configure-network.ps1`)
 
-### IP Configuration
-- Assign static IPs for management/compute:
-  - `azljkt01n1` → 10.8.230.222
-  - `azljkt01n2` → 10.8.230.232
-- Verify DNS forwarder (10.8.230.248).
+Defines management VLAN 230 and storage VLANs 711/712. Currently a guarded placeholder; `-Apply` intentionally stops until exact OS adapter names and Network ATC intents are confirmed.
 
-### Security Baseline
-- Enable BitLocker (boot + data volumes).
-- Enforce Credential Guard, WDAC, SMB signing.
-- Configure drift control enforcement.
+- Management/Compute intent on the two 10GbE ports.
+- Storage intent on the two 25GbE ports; RDMA/iWARP; storage auto-IP (`10.71.0.0/16`).
+- Let Network ATC own host networking; avoid manual SET teams or storage vNICs.
 
----
+## Stage 3 — Node preparation (`03-prepare-node.ps1`)
 
-## Post‑Deployment
+Guarded placeholder for hostname, DNS A records, the dedicated non-built-in local admin, security baseline, firmware/SBE readiness, and environment validation.
 
-### Updates & Maintenance
+- Static management IPs: `azljkt01n1` → `10.8.230.222`, `azljkt01n2` → `10.8.230.232`.
+- DNS forwarder: **`10.8.230.51`** (from `lab-config.psd1`).
+- Security baseline: BitLocker (boot + data), Credential Guard, WDAC, SMB signing, drift control.
+
+> [!CAUTION]
+> Keep the ODIN report aligned with `lab-config.psd1`. DNS server IPs cannot change after deployment.
+
+## Stage 4 — Azure Arc registration (`04-register-arc.ps1`)
+
+Validate-first placeholder for Azure context, resource providers, RBAC, Arc registration, post-reboot health, and Dell SBE applicability. Use the release-matched Arc initialization procedure when implemented.
+
+## Stage 5 — Azure Local deployment (`05-deploy-azure-local.ps1`)
+
+ARM validation by default. Deployment requires `-EnableDeployment` and a typed `DEPLOY` confirmation after `what-if`.
+
+```powershell
+.\bootstrap-cluster.ps1 -Stage 05-deploy-azure-local `
+  -SubscriptionId <sub-id> -TenantId <tenant-id> `
+  -TemplateFile ..\arm-templates\azuredeploy.json `
+  -ParameterFile ..\arm-templates\azure-local.parameters.json
+```
+
+> [!TIP]
+> Two-node deployment requires a dedicated Cloud Witness storage account; use one Key Vault per cluster. Deploy once via the portal first, then standardize the ARM template.
+
+## Stage 6 — Cluster validation (`06-validate-cluster.ps1`)
+
+Confirms cluster object, node membership/state, quorum, and Storage Spaces Direct health.
+
+## Post-deployment
+
 - Apply SBE packages for Azure Local updates.
-- Document GPU integration or optional features if used.
+- Manage with Dell OpenManage Integration for Windows Admin Center; monitor Support Matrix compliance.
+- Keep credentials and firmware versions in the private runbook.
 
-### Monitoring & Lifecycle
-- Use Dell OpenManage Integration with Windows Admin Center (WAC).
-- Monitor compliance with Dell Support Matrix.
-- Reference private runbook for credentials and sensitive values.
+## Best practice
 
----
-
-## Best Practice
-- Keep sensitive values (localAdminUsername, localAdminPassword, subscription IDs) in private OneNote runbook.
-- Public repo should reference Dell docs and conventions, but never expose credentials.
-- Cross‑reference: *“See private runbook for credentials and firmware versions.”*
+> [!IMPORTANT]
+> - No credentials, tenant IDs, subscription IDs, or secrets in the repo.
+> - Cross-reference: "See private runbook for credentials and firmware versions."
