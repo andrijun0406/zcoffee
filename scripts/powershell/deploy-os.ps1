@@ -1,87 +1,184 @@
+[CmdletBinding()]
 param(
+    [Parameter(Mandatory)]
     [string]$NodeIP,
-    [string]$iDRACUser,
-    [object]$iDRACPassword,
+
+    [string]$iDRACUser = 'root',
+
+    [SecureString]$iDRACPassword,
+
+    [Parameter(Mandatory)]
+    [ValidatePattern('^https?://')]
     [string]$ISOUrl,
-    [string]$RACADMPath = 'racadm'
+
+    [string]$RACADMPath = 'racadm',
+
+    [switch]$StartInstallation,
+
+    [switch]$NoCertWarn
 )
 
+Set-StrictMode -Version Latest
+$ErrorActionPreference = 'Stop'
+
 function Ensure-RunningAsAdministrator {
-    $currentUser = [Security.Principal.WindowsIdentity]::GetCurrent()
-    $principal = New-Object Security.Principal.WindowsPrincipal($currentUser)
-    if (-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
-        Write-Host "ERROR: This script must be run with Administrator privileges." -ForegroundColor Red
-        Write-Host "Right-click PowerShell and select 'Run as Administrator', then rerun this script." -ForegroundColor Yellow
-        throw "Administrator privileges required."
+    $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
+    $principal = [Security.Principal.WindowsPrincipal]::new($identity)
+
+    if (-not $principal.IsInRole(
+        [Security.Principal.WindowsBuiltInRole]::Administrator)) {
+        throw 'This script must be run with Administrator privileges.'
     }
+}
+
+function Resolve-RACADM {
+    param(
+        [Parameter(Mandatory)]
+        [string]$Path
+    )
+
+    if (Test-Path -LiteralPath $Path -PathType Leaf) {
+        return (Resolve-Path -LiteralPath $Path).Path
+    }
+
+    $command = Get-Command $Path `
+        -CommandType Application `
+        -ErrorAction SilentlyContinue
+
+    if ($command) {
+        return $command.Source
+    }
+
+    throw "RACADM executable was not found: $Path"
+}
+
+function Convert-SecureStringToPlainText {
+    param(
+        [Parameter(Mandatory)]
+        [SecureString]$SecureString
+    )
+
+    $bstr = [Runtime.InteropServices.Marshal]::SecureStringToBSTR(
+        $SecureString)
+
+    try {
+        return [Runtime.InteropServices.Marshal]::PtrToStringBSTR($bstr)
+    }
+    finally {
+        [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($bstr)
+    }
+}
+
+function Invoke-RACADM {
+    param(
+        [Parameter(Mandatory)]
+        [string[]]$CommandArguments
+    )
+
+    $arguments = @(
+        '-r', $NodeIP,
+        '-u', $iDRACUser,
+        '-p', $iDRACPasswordPlain
+    )
+
+    if ($NoCertWarn) {
+        $arguments += '--nocertwarn'
+    }
+
+    $arguments += $CommandArguments
+
+    $output = & $RacadmExe @arguments 2>&1
+    $exitCode = $LASTEXITCODE
+
+    if ($exitCode -ne 0) {
+        $safeOutput = ($output | ForEach-Object {
+            $_.ToString().Replace(
+                $iDRACPasswordPlain,
+                '<redacted>')
+        }) -join [Environment]::NewLine
+
+        throw "RACADM command failed for $NodeIP. Output: $safeOutput"
+    }
+
+    return $output
+}
+
+function Test-RACADMConnection {
+    Write-Host "Testing iDRAC connectivity: $NodeIP"
+
+    $null = Invoke-RACADM -CommandArguments @('getsysinfo')
+
+    Write-Host "iDRAC connectivity verified: $NodeIP"
 }
 
 Ensure-RunningAsAdministrator
 
-function Test-RACADMConnection {
-    param(
-        [string]$NodeIP,
-        [string]$RACADMPath,
-        [string]$iDRACUser,
-        [string]$iDRACPassword
+if (-not $PSBoundParameters.ContainsKey('iDRACPassword') -or
+    $null -eq $iDRACPassword) {
+    $iDRACPassword = Read-Host `
+        -Prompt "Enter the iDRAC password for '$iDRACUser'" `
+        -AsSecureString
+}
+
+$uri = [Uri]::new($ISOUrl)
+
+if ($uri.Host -in @('localhost', '127.0.0.1', '::1')) {
+    throw 'ISOUrl must use an address reachable from the iDRAC, not localhost.'
+}
+
+if ($uri.Scheme -notin @('http', 'https')) {
+    throw 'ISOUrl must use HTTP or HTTPS.'
+}
+
+$RacadmExe = Resolve-RACADM -Path $RACADMPath
+$iDRACPasswordPlain = $null
+
+try {
+    $iDRACPasswordPlain = Convert-SecureStringToPlainText `
+        -SecureString $iDRACPassword
+
+    Write-Host "Using RACADM: $RacadmExe"
+    Test-RACADMConnection
+
+    Write-Host "Mounting ISO on $NodeIP"
+
+    $null = Invoke-RACADM -CommandArguments @(
+        'remoteimage',
+        '-c',
+        '-l',
+        $ISOUrl
     )
 
-    Write-Host "Testing iDRAC connectivity to $NodeIP..."
-    # Resolve the racadm executable first so we can show helpful diagnostics
-    $cmd = Get-Command $RACADMPath -ErrorAction SilentlyContinue
-    if (-not $cmd) {
-        Write-Host "ERROR: Could not find executable '$RACADMPath' in PATH." -ForegroundColor Red
-        Write-Host "Provide the full path to the RACADM binary using -RACADMPath, or install Dell RACADM and ensure it's on PATH." -ForegroundColor Yellow
-        Write-Host "Current PATH:"
-        $env:PATH -split ';' | ForEach-Object { Write-Host " - $_" }
-        throw "RACADM executable not found"
+    Write-Host "Remote ISO mounted successfully on $NodeIP"
+
+    if ($StartInstallation) {
+        Write-Host 'Setting one-time boot to virtual CD/DVD'
+
+        $null = Invoke-RACADM -CommandArguments @(
+            'set',
+            'iDRAC.ServerBoot.FirstBootDevice',
+            'VCD-DVD'
+        )
+
+        $null = Invoke-RACADM -CommandArguments @(
+            'set',
+            'iDRAC.ServerBoot.BootOnce',
+            '1'
+        )
+
+        Write-Host "Power-cycling $NodeIP to start the Golden Image installer"
+
+        $null = Invoke-RACADM -CommandArguments @(
+            'serveraction',
+            'powercycle'
+        )
+
+        Write-Host "Installation boot initiated on $NodeIP"
     }
-
-    $exe = $cmd.Source
-    Write-Host "Using RACADM: $exe"
-
-    $result = & $exe -r $NodeIP --nocertwarn -u $iDRACUser -p $iDRACPassword getsysinfo 2>&1
-    Write-Host $result
-    if ($LASTEXITCODE -ne 0) {
-        Write-Host "ERROR: Unable to connect to iDRAC at $NodeIP." -ForegroundColor Red
-        Write-Host "Command output:" -ForegroundColor Yellow
-        Write-Host $result
-
-        Write-Host "-- Additional diagnostics --"
-        Write-Host "Testing network reachability to $NodeIP (ping):"
-        try {
-            Test-Connection -ComputerName $NodeIP -Count 2 -ErrorAction Stop | ForEach-Object { Write-Host $_ }
-        } catch {
-            Write-Host "Ping failed or blocked." -ForegroundColor Yellow
-        }
-
-        Write-Host "Testing TCP port 443 to $NodeIP (common iDRAC HTTPS port):"
-        try {
-            $tc = Test-NetConnection -ComputerName $NodeIP -Port 443 -InformationLevel Detailed -WarningAction SilentlyContinue
-            Write-Host $tc | Out-String
-        } catch {
-            Write-Host "Port check failed or Test-NetConnection not available." -ForegroundColor Yellow
-        }
-
-        throw "iDRAC connectivity test failed for $NodeIP"
+    else {
+        Write-Host 'Installation was not started. Use -StartInstallation to boot from the ISO.'
     }
-
-    Write-Host "iDRAC connectivity to $NodeIP verified."
 }
-
-# Accept either plain text or SecureString password and convert to plain text before calling racadm
-$iDRACPasswordPlain = switch ($iDRACPassword) {
-    { $_ -is [SecureString] } { [Runtime.InteropServices.Marshal]::PtrToStringAuto([Runtime.InteropServices.Marshal]::SecureStringToBSTR($_)) }
-    { $_ -is [string] } { $_ }
-    default { throw "iDRAC password must be a string or SecureString." }
+finally {
+    $iDRACPasswordPlain = $null
 }
-
-#Test-RACADMConnection -NodeIP $NodeIP -RACADMPath $RACADMPath -iDRACUser $iDRACUser -iDRACPassword $iDRACPasswordPlain
-
-Write-Host "Mounting ISO to $NodeIP via RACADM on $ISOurl" 
-
-& $RACADMPath -r $NodeIP -u $iDRACUser -p $iDRACPasswordPlain --nocertwarn remoteimage -c -l $ISOUrl
-#& $RACADMPath -r $NodeIP -u $iDRACUser -p $iDRACPasswordPlain --nocertwarn set iDRAC.ServerBoot.NextBootDevice VCD-DVD
-#& $RACADMPath -r $NodeIP -u $iDRACUser -p $iDRACPasswordPlain --nocertwarn serveraction powercycle
-
-Write-Host "OS deployment initiated for $NodeIP"
