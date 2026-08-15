@@ -1,7 +1,7 @@
 @{
     # ============================================================
     # Azure Local Lab - single source of truth (Jakarta 01)
-    # Compare this file against the ODIN config report before deploying.
+    # Aligned with ODIN config report generated 2026-08-15.
     # No secrets here: keep passwords, subscription, and tenant in the private runbook.
     # ============================================================
 
@@ -23,7 +23,15 @@
     StorageVlan1   = 711
     StorageVlan2   = 712
     Gateway        = '10.8.230.1'
+    InfraCidr      = '10.8.230.0/24'
+    InfraIpPoolStart = '10.8.230.132'
+    InfraIpPoolEnd   = '10.8.230.137'
+    StorageAutoIpSubnet = '10.71.0.0/16'
     HttpPort       = 8080
+
+    # Adapter names (must match the OS-reported names for Network ATC intents)
+    MgmtAdapters    = @('Integrated NIC1 Port 1-1', 'Integrated NIC1 Port 2-1')  # 10GbE, RDMA No
+    StorageAdapters = @('SLOT 2 Port 1', 'SLOT 2 Port 2')                        # 25GbE, RDMA Yes (iWARP)
 
     # Host preparation
     LocalAdminUser = 'LabAdmin'
@@ -33,9 +41,9 @@
     SubscriptionId = ''
     TenantId       = ''
 
-    # Nodes
+    # Nodes (HostIP from ODIN report; iDRAC = out-of-band mgmt, not in ODIN report)
     Nodes = @(
-        @{ Name = 'azljkt01n1'; HostIP = '10.8.230.222'; iDRAC = '10.8.230.84'; ServiceTag = 'JF7C7J3' }
-        @{ Name = 'azljkt01n2'; HostIP = '10.8.230.232'; iDRAC = '10.8.230.86'; ServiceTag = '1G7C7J3' }
+        @{ Name = 'azljkt01n1'; HostIP = '10.8.230.71'; iDRAC = '10.8.230.84'; ServiceTag = 'JF7C7J3' }
+        @{ Name = 'azljkt01n2'; HostIP = '10.8.230.72'; iDRAC = '10.8.230.86'; ServiceTag = '1G7C7J3' }
     )
 }

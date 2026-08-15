@@ -28,11 +28,11 @@ This guide maps the six-stage automation to the Dell AX System for Azure Local (
 ## Pre-deployment
 
 - Register a Partner Admin Link (PAL) for Azure solutions.
-- Verify cabling: 25GbE back-to-back for storage (Ports 3/4), 10GbE for management/compute (Ports 1/2).
+- Verify cabling: 25GbE back-to-back for storage (SLOT 2 Port 1/2), 10GbE for management/compute (Integrated NIC1 Port 1-1/2-1).
 - Confirm VLAN/IP layout:
     - VLAN 230 → Management/Compute (`10.8.230.0/24`)
-    - VLAN 711 → StorageNetwork1 (Port 3)
-    - VLAN 712 → StorageNetwork2 (Port 4)
+    - VLAN 711 → StorageNetwork1 (SLOT 2 Port 1)
+    - VLAN 712 → StorageNetwork2 (SLOT 2 Port 2)
 - Firmware/software compliance: validate against the Dell Support Matrix and record BIOS/NIC/driver/SBE versions in the private runbook. Update all nodes before OS deployment.
 
 ## Configuration source of truth
@@ -70,15 +70,15 @@ Runs `preflight-os.ps1`, starts the ISO HTTP server bound to a reachable managem
 
 Defines management VLAN 230 and storage VLANs 711/712. Currently a guarded placeholder; `-Apply` intentionally stops until exact OS adapter names and Network ATC intents are confirmed.
 
-- Management/Compute intent on the two 10GbE ports.
-- Storage intent on the two 25GbE ports; RDMA/iWARP; storage auto-IP (`10.71.0.0/16`).
+- Management/Compute intent on Integrated NIC1 Port 1-1 and Port 2-1 (10GbE).
+- Storage intent on SLOT 2 Port 1 and Port 2 (25GbE); RDMA/iWARP; storage auto-IP (`10.71.0.0/16`).
 - Let Network ATC own host networking; avoid manual SET teams or storage vNICs.
 
 ## Stage 3 — Node preparation (`03-prepare-node.ps1`)
 
 Guarded placeholder for hostname, DNS A records, the dedicated non-built-in local admin, security baseline, firmware/SBE readiness, and environment validation.
 
-- Static management IPs: `azljkt01n1` → `10.8.230.222`, `azljkt01n2` → `10.8.230.232`.
+- Static management IPs: `azljkt01n1` → `10.8.230.71`, `azljkt01n2` → `10.8.230.72`.
 - DNS forwarder: **`10.8.230.51`** (from `lab-config.psd1`).
 - Security baseline: BitLocker (boot + data), Credential Guard, WDAC, SMB signing, drift control.
 

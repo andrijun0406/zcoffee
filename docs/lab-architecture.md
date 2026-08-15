@@ -13,21 +13,21 @@ The current Dell Azure Local **2606** support matrix and SBE release notes list 
 - PCIe: QLogic FastLinQ 41262 2x10/25GbE
 
 ## Network topology (switchless storage)
-- **Management/Compute**: two Intel X710 10GbE ports to the ToR switch, VLAN 230, `10.8.230.0/24`.
+- **Management/Compute**: Integrated NIC1 Port 1-1 and Port 2-1 (Intel X710 10GbE) to the ToR switch, VLAN 230, `10.8.230.0/24`.
 - **Storage**: QLogic FastLinQ 41262, two 25GbE links connected **back-to-back** between nodes.
-  - StorageNetwork1: Port 3, VLAN 711
-  - StorageNetwork2: Port 4, VLAN 712
+  - StorageNetwork1: SLOT 2 Port 1, VLAN 711
+  - StorageNetwork2: SLOT 2 Port 2, VLAN 712
   - RDMA enabled; the FastLinQ 41262 is validated with **iWARP** (not RoCE).
   - No default gateway on storage; storage IPs assigned automatically by Network ATC.
 - Switchless storage covers only east-west storage traffic. Management, compute, DNS, Arc, and VM traffic still use the switched 10GbE network.
 
 ### Port configuration (from ODIN config report)
-| Port | Speed | RDMA | Role |
-|------|-------|------|------|
-| Port 1 | 10GbE | No | Management + Compute |
-| Port 2 | 10GbE | No | Management + Compute |
-| Port 3 | 25GbE | Yes | StorageNetwork1 (VLAN 711) |
-| Port 4 | 25GbE | Yes | StorageNetwork2 (VLAN 712) |
+| OS adapter name | Speed | RDMA | Role |
+|-----------------|-------|------|------|
+| Integrated NIC1 Port 1-1 | 10GbE | No | Management + Compute |
+| Integrated NIC1 Port 2-1 | 10GbE | No | Management + Compute |
+| SLOT 2 Port 1 | 25GbE | Yes | StorageNetwork1 (VLAN 711) |
+| SLOT 2 Port 2 | 25GbE | Yes | StorageNetwork2 (VLAN 712) |
 
 ## Identity & security
 - Local Identity + Azure Key Vault (AD-less).
@@ -41,7 +41,7 @@ The current Dell Azure Local **2606** support matrix and SBE release notes list 
 | IP assignment | Static |
 | VLAN ID | 230 |
 | Infra CIDR | `10.8.230.0/24` |
-| Infra IP pool | `10.8.230.242 - 10.8.230.247` (>= 6 contiguous IPs) |
+| Infra IP pool | `10.8.230.132 - 10.8.230.137` (>= 6 contiguous IPs) |
 | Default gateway | `10.8.230.1` |
 | Storage subnets | Network ATC auto-IP (`10.71.0.0/16`) |
 
@@ -50,8 +50,8 @@ Do not overlap `10.96.0.0/12` or `10.244.0.0/16` (reserved for AKS Arc / Arc Res
 ## Node and iDRAC addressing
 | Node | Host name | Host IP | iDRAC IP | Service Tag |
 |------|-----------|---------|----------|-------------|
-| 1 | azljkt01n1 | `10.8.230.222` | `10.8.230.84` | JF7C7J3 |
-| 2 | azljkt01n2 | `10.8.230.232` | `10.8.230.86` | 1G7C7J3 |
+| 1 | azljkt01n1 | `10.8.230.71` | `10.8.230.84` | JF7C7J3 |
+| 2 | azljkt01n2 | `10.8.230.72` | `10.8.230.86` | 1G7C7J3 |
 
 ## DNS & naming convention
 
@@ -81,7 +81,7 @@ Pattern: `azl<location><instance><role>` — lowercase, **no hyphens** for DNS a
 - Scenario: connected · Azure Commercial · Region: Southeast Asia
 - Scale: Standard · Nodes: 2 · Cloud Witness: Cloud
 - Arc Gateway: Enabled (recommended) · Proxy: disabled · Private endpoints: disabled
-- SDN features: lnet, nsg (Arc-managed)
+- SDN features: None (SDN management not applicable)
 
 ## Best practice
 - Keep tenant IDs, subscription IDs, and secrets in the private runbook, not in GitHub.

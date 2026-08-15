@@ -35,7 +35,7 @@ Each stage writes a timestamped log to `logs/<stage>-<yyyyMMdd-HHmmss>.log` and 
 ## Stage 5 — Azure Local deployment
 | Symptom | Likely cause | Fix |
 |---------|--------------|-----|
-| Validation passes, deploy fails | Wrong adapter names / storage list / IP pool | Match exact OS adapter names; verify infra pool `10.8.230.242-247` |
+| Validation passes, deploy fails | Wrong adapter names / storage list / IP pool | Match exact OS adapter names; verify infra pool `10.8.230.132-137` |
 | Quorum unstable | Witness unreachable or shared | Use a dedicated Cloud Witness account; test outbound HTTPS from both nodes |
 | Deploy blocked by default | `-EnableDeployment` not set | Re-run with `-EnableDeployment` after `what-if` review |
 
