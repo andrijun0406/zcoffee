@@ -14,3 +14,9 @@ arm-templates/*.local.json
 *.secret
 *.pfx
 *.key
+
+# Unattended install answer-file artifacts (contain obfuscated admin password)
+autounattend.iso
+Autounattend.xml
+autounattend.xml
+*autounattend*.iso

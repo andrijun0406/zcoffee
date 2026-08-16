@@ -15,7 +15,10 @@ param(
 
     [switch]$StartInstallation,
 
-    [switch]$NoCertWarn
+    [switch]$NoCertWarn,
+
+    [ValidatePattern('^https?://')]
+    [string]$AutounattendUrl
 )
 
 Set-StrictMode -Version Latest
@@ -150,6 +153,15 @@ try {
     )
 
     Write-Host "Remote ISO mounted successfully on $NodeIP"
+
+    if ($AutounattendUrl) {
+        Write-Host "Attaching Autounattend image via RFS2 on $NodeIP"
+        $detachArgs = @('-r', $NodeIP, '-u', $iDRACUser, '-p', $iDRACPasswordPlain)
+        if ($NoCertWarn) { $detachArgs += '--nocertwarn' }
+        & $RacadmExe @detachArgs remoteimage2 -d 2>&1 | Out-Null
+        $null = Invoke-RACADM -CommandArguments @('remoteimage2', '-c', '-l', $AutounattendUrl)
+        Write-Host "Autounattend image attached via RFS2 on $NodeIP"
+    }
 
     if ($StartInstallation) {
         Write-Host 'Setting one-time boot to virtual CD/DVD'

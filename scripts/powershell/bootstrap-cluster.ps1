@@ -1,42 +1,48 @@
 [CmdletBinding()]
 param(
     [ValidateSet(
-        '01-deploy-os',
-        '02-configure-network',
-        '03-prepare-node',
-        '04-register-arc',
-        '05-deploy-azure-local',
-        '06-validate-cluster'
+        '01-deploy-os','02-configure-network','03-prepare-node',
+        '04-register-arc','05-deploy-azure-local','06-validate-cluster'
     )]
     [string]$Stage = '01-deploy-os',
 
     [switch]$UseGui,
 
-    [string]$iDRACUser = 'root',
+    # Overrides (optional). If omitted, values come from lab-config.psd1.
+    [string]$iDRACUser,
     [SecureString]$iDRACPassword,
     [string]$ISOFile,
+    [string]$ISOUrl,
     [string]$ExpectedISOHash,
-    [int]$HttpPort = 8080,
+    [int]$HttpPort,
     [string]$HttpHost,
+    [string]$HttpBind,
     [string]$RACADMPath = 'racadm',
     [switch]$StartInstallation,
     [switch]$NoCertWarn,
     [int]$ServerLifetimeMinutes = 240,
     [switch]$NoWait,
 
-    [string]$DnsServer = '10.8.230.51',
+    [string]$DnsServer,
     [switch]$Apply,
 
     [ValidateSet('Validate','Register')]
     [string]$ArcMode = 'Validate',
     [string]$SubscriptionId,
     [string]$TenantId,
-    [string]$ResourceGroupName = 'azljkt01rg',
+    [string]$ResourceGroupName,
     [string]$TemplateFile,
     [string]$ParameterFile,
-    [string]$DeploymentName = 'azljkt01dep',
+    [string]$DeploymentName,
     [switch]$EnableDeployment,
-    [string]$ClusterName = 'azl-jkt-01-clu'
+    [string]$ClusterName,
+
+    # Hardware prep (Stage 01 only)
+    [switch]$FirmwareCheckOnly,
+    [switch]$UpdateFirmware,
+    [string]$CatalogUrl,
+    [switch]$RecreateBossVd,
+    [switch]$ForceHardwarePrep
 )
 
 Set-StrictMode -Version Latest
@@ -45,74 +51,55 @@ $ErrorActionPreference = 'Stop'
 
 $root = $PSScriptRoot
 $stageScript = Join-Path $root "$Stage.ps1"
-if (-not (Test-Path $stageScript -PathType Leaf)) {
-    throw "Stage script not found: $stageScript"
-}
+if (-not (Test-Path $stageScript -PathType Leaf)) { throw "Stage script not found: $stageScript" }
 
 Write-Host ''
 Write-Host '############################################################' -ForegroundColor Magenta
 Write-Host " Azure Local Lab (Jakarta 01) - dispatching stage: $Stage" -ForegroundColor Magenta
+Write-Host " Source of truth: lab-config.psd1 (parameters override it)" -ForegroundColor Magenta
 Write-Host '############################################################' -ForegroundColor Magenta
+
+# Forward only parameters the caller actually provided, so each stage can
+# fall back to lab-config.psd1 for everything else.
+$forward = @{}
+foreach ($k in $PSBoundParameters.Keys) {
+    if ($k -in @('Stage')) { continue }
+    $forward[$k] = $PSBoundParameters[$k]
+}
 
 switch ($Stage) {
     '01-deploy-os' {
-        if (-not $PSBoundParameters.ContainsKey('iDRACPassword') -or $null -eq $iDRACPassword) {
-            $iDRACPassword = Read-Host -Prompt "Enter the iDRAC password for '$iDRACUser'" -AsSecureString
+        if (-not $forward.ContainsKey('iDRACPassword')) {
+            $u = if ($forward.ContainsKey('iDRACUser')) { $forward['iDRACUser'] } else { 'root' }
+            $forward['iDRACPassword'] = Read-Host -Prompt "Enter the iDRAC password for '$u'" -AsSecureString
         }
-        & $stageScript `
-            -iDRACUser $iDRACUser `
-            -iDRACPassword $iDRACPassword `
-            -ISOFile $ISOFile `
-            -ExpectedISOHash $ExpectedISOHash `
-            -HttpPort $HttpPort `
-            -HttpHost $HttpHost `
-            -RACADMPath $RACADMPath `
-            -StartInstallation:$StartInstallation `
-            -NoCertWarn:$NoCertWarn `
-            -ServerLifetimeMinutes $ServerLifetimeMinutes `
-            -NoWait:$NoWait `
-            -UseGui:$UseGui
     }
-
-    '02-configure-network' {
-        & $stageScript -MgmtGateway '10.8.230.1' -DnsServer $DnsServer -Apply:$Apply -UseGui:$UseGui
-    }
-
-    '03-prepare-node' {
-        & $stageScript -DnsServer $DnsServer -Apply:$Apply -UseGui:$UseGui
-    }
-
-    '04-register-arc' {
-        & $stageScript `
-            -Mode $ArcMode `
-            -SubscriptionId $SubscriptionId `
-            -TenantId $TenantId `
-            -ResourceGroupName $ResourceGroupName `
-            -Apply:$Apply `
-            -UseGui:$UseGui
-    }
-
     '05-deploy-azure-local' {
-        if (-not $SubscriptionId -or -not $TemplateFile -or -not $ParameterFile) {
-            throw 'Provide -SubscriptionId, -TemplateFile, and -ParameterFile.'
+        if (-not $forward.ContainsKey('TemplateFile') -or -not $forward.ContainsKey('ParameterFile')) {
+            throw 'Provide -TemplateFile and -ParameterFile for the Azure Local stage.'
         }
-        $deploymentMode = if ($EnableDeployment) { 'Deploy' } else { 'Validate' }
-        & $stageScript `
-            -DeploymentMode $deploymentMode `
-            -EnableDeployment:$EnableDeployment `
-            -SubscriptionId $SubscriptionId `
-            -TenantId $TenantId `
-            -ResourceGroupName $ResourceGroupName `
-            -TemplateFile $TemplateFile `
-            -ParameterFile $ParameterFile `
-            -DeploymentName $DeploymentName `
-            -UseGui:$UseGui
-    }
-
-    '06-validate-cluster' {
-        & $stageScript -ClusterName $ClusterName -NodeNames @('azljkt01n1','azljkt01n2') -UseGui:$UseGui
+        if ($forward.ContainsKey('EnableDeployment') -and $EnableDeployment) {
+            $forward['DeploymentMode'] = 'Deploy'
+        }
     }
 }
+
+# ArcMode maps to the stage's -Mode parameter.
+if ($Stage -eq '04-register-arc') {
+    if ($forward.ContainsKey('ArcMode')) { $forward['Mode'] = $forward['ArcMode']; $forward.Remove('ArcMode') }
+}
+else {
+    $forward.Remove('ArcMode') | Out-Null
+}
+
+# Drop parameters not accepted by the target stage to avoid binding errors.
+$stageParams = (Get-Command $stageScript).Parameters.Keys
+$clean = @{}
+foreach ($k in $forward.Keys) {
+    if ($stageParams -contains $k) { $clean[$k] = $forward[$k] }
+}
+
+& $stageScript @clean
 
 Write-Host ''
 Write-Host "Dispatcher finished stage: $Stage" -ForegroundColor Magenta

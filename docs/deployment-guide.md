@@ -63,8 +63,31 @@ Runs `preflight-os.ps1`, starts the ISO HTTP server bound to a reachable managem
 
 > [!NOTE]
 > - The ISO server must bind to an IP both iDRACs can reach; loopback/wildcard is rejected.
-> - Prepare/clean the BOSS boot virtual disk in iDRAC before installing.
 > - Use `-ExpectedISOHash <sha256>` to enforce image integrity.
+
+### Optional hardware preparation (runs before OS install)
+
+Stage 1 can bring each node to a known-good state first, via `prepare-hardware.ps1`. These run per node, after the credential prompt and before the ISO server starts. All are opt-in.
+
+- `-FirmwareCheckOnly` — non-destructive. Compares installed firmware against the catalog and prints an installed-vs-available report (`racadm update ... --verifycatalog` + `update viewreport`). Nothing is applied.
+- `-UpdateFirmware` — applies updates from the catalog (`-a FALSE`, no downgrades). Reboots the node and tracks the job to completion.
+- `-CatalogUrl <host>` — HTTPS catalog host. Defaults to `FirmwareCatalogUrl` in `lab-config.psd1` (`downloads.dell.com`).
+- `-RecreateBossVd` — DESTRUCTIVE. Discovers the BOSS controller, deletes existing VD(s), and creates a fresh RAID-1 boot VD named `OS`, committing via a power-cycle config job. Prompts for a typed confirmation (the node service tag) per node unless `-ForceHardwarePrep` is given.
+
+```powershell
+# Check firmware only (safe, no changes)
+.\bootstrap-cluster.ps1 -Stage 01-deploy-os -HttpHost 2.2.2.4 -FirmwareCheckOnly -NoCertWarn
+
+# Full redeploy prep: update firmware, then recreate the BOSS boot VD, then mount + install
+.\bootstrap-cluster.ps1 -Stage 01-deploy-os -HttpHost 2.2.2.4 `
+  -UpdateFirmware -RecreateBossVd -StartInstallation -NoCertWarn
+```
+
+> [!WARNING]
+> `-RecreateBossVd` wipes the OS boot volume. It is intended for redeploy/reinstall, so the operator confirms per node by typing the service tag (from `lab-config.psd1`). Use `-ForceHardwarePrep` only for fully unattended reruns where data loss is already accepted.
+
+> [!IMPORTANT]
+> Firmware from `downloads.dell.com` is always-latest and can exceed the Dell Azure Local support matrix. For strict compliance, point `-CatalogUrl` at a Dell Repository Manager catalog pinned to the validated versions, and record the applied versions in the private runbook. Firmware update requires the iDRAC to have outbound HTTPS to the catalog host.
 
 ## Stage 2 — Host networking (`02-configure-network.ps1`)
 
