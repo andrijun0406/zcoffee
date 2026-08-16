@@ -145,6 +145,7 @@ try {
             throw "ISO HTTP server exited unexpectedly. Server error: $err"
         }
 
+        $ProgressPreference = 'SilentlyContinue'
         if (-not (Test-NetConnection -ComputerName $script:HttpHost -Port $script:HttpPort `
             -InformationLevel Quiet -WarningAction SilentlyContinue)) {
             throw "ISO server not reachable at $script:HttpHost`:$script:HttpPort"
@@ -171,14 +172,22 @@ try {
     if ($script:ISOUrl) {
         Write-Info 'External ISO URL in use; no local server to keep alive.'
     }
-    elseif (-not $NoWait) {
-        Write-Info "Keeping ISO server alive up to $ServerLifetimeMinutes minutes for installation."
+    elseif ($StartInstallation -and -not $NoWait) {
+        Write-Info "Installation started. Keeping ISO server alive up to $ServerLifetimeMinutes minutes."
+        Write-Info 'Leave this window open until both nodes finish installing.'
         for ($m = 1; $m -le $ServerLifetimeMinutes; $m++) {
             if ($serverProcess.HasExited) { throw 'ISO server exited during installation.' }
             Start-Sleep -Seconds 60
             if (($m % 10) -eq 0) { Write-Info "ISO server elapsed: $m minute(s)" }
         }
-    } else { Write-Warn 'NoWait selected; ISO server stops when this stage exits.' }
+    }
+    elseif ($StartInstallation -and $NoWait) {
+        Write-Warn 'NoWait selected; ISO server stops now. Nodes may fail to read the image mid-install.'
+    }
+    else {
+        Write-Info 'ISO mounted but installation not started. Server will stop now.'
+        Write-Info 'Re-run with -StartInstallation to set one-time VCD-DVD boot and power-cycle the nodes.'
+    }
 
     Complete-Ui -FinalMessage 'OS deployment stage finished.'
 }
