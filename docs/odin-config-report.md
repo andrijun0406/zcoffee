@@ -89,7 +89,7 @@
 | Credential Guard | Enabled |
 | Drift Control | Enabled |
 | SMB Signing | Enabled |
-| SMB Cluster Encryption | Enabled |
+| SMB Cluster Encryption | Disabled |
 | BitLocker Boot Volume | Enabled |
 | BitLocker Data Volumes | Enabled |
 
