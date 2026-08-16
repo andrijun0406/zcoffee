@@ -21,6 +21,7 @@ zcoffee/
 │       ├── ui-common.ps1              # shared progress dashboard / logging / GUI + config loader
 │       ├── preflight-os.ps1           # non-destructive OS prerequisite checks
 │       ├── deploy-os.ps1              # RACADM worker (mount ISO, optional boot)
+│       ├── serve-iso.ps1              # native PowerShell ISO HTTP server (no Python)
 │       ├── 01-deploy-os.ps1
 │       ├── 02-configure-network.ps1
 │       ├── 03-prepare-node.ps1
@@ -37,7 +38,7 @@ zcoffee/
 - 2 x Dell PowerEdge R650 (see `docs/lab-architecture.md`).
 - Management PC with Windows PowerShell 5.1+ or PowerShell 7+, run as Administrator.
 - Dell RACADM (iDRAC Tools) on PATH or provided via `-RACADMPath`.
-- Python 3.x on PATH (`py`, `python`, or `python3`) to serve the ISO over HTTP.
+- No Python needed — the ISO is served by a native PowerShell HTTP server (`serve-iso.ps1`).
 - Dell-provided Azure Local Golden Image ISO under `isos/` (not committed).
 - Azure CLI for the Azure Local deployment stage.
 - Network: VLAN 230 (`10.8.230.0/24`) management/compute; VLANs 711/712 for switchless storage.

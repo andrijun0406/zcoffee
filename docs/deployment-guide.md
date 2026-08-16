@@ -44,7 +44,7 @@ This guide maps the six-stage automation to the Dell AX System for Azure Local (
 
 - Windows PowerShell 5.1+ or PowerShell 7+, run as Administrator.
 - Dell RACADM on PATH or via `-RACADMPath`.
-- Python 3.x on PATH (`py`, `python`, or `python3`) — used only to serve the Golden Image ISO over HTTP so RACADM can mount it to each iDRAC. Verify with `python --version` or `py --version`.
+- No Python needed. The Golden Image ISO is served by a native PowerShell HTTP server (`serve-iso.ps1`, uses .NET HttpListener) that Stage 1 launches automatically.
 - Azure CLI for Stage 5.
 - Keep the Golden Image ISO under `isos/` (gitignored). Never commit ISOs.
 
