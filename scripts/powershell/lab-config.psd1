@@ -40,7 +40,7 @@
     # Firmware catalog for hardware prep. Default pulls latest from Dell online.
     # For strict Azure Local support-matrix compliance, point this at a DRM catalog
     # host pinned to the validated versions instead of always-latest downloads.dell.com.
-    FirmwareCatalogUrl = 'downloads.dell.com'
+    FirmwareCatalogUrl = 'downloads.dell.com/Catalog'
 
     # Azure scope (fill from private runbook / ODIN report; leave blank in Git)
     SubscriptionId = ''

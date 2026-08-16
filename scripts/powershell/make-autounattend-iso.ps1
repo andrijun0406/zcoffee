@@ -63,7 +63,7 @@ finally {
 }
 
 $issues = Test-PasswordComplexity -Plain $plain
-if ($issues.Count -gt 0) {
+if (@($issues).Count -gt 0) {
     throw ("Password does not meet Azure Local complexity. It needs " + ($issues -join ', ') + '.')
 }
 

@@ -41,7 +41,7 @@ if (-not $iDRACUser) { $iDRACUser = 'root' }
 $HttpPort  = Resolve-Setting -Name 'HttpPort'  -Bound $b -Current $HttpPort  -ConfigKey 'HttpPort'  -Config $cfg
 if (-not $HttpPort) { $HttpPort = 8080 }
 $CatalogUrl = Resolve-Setting -Name 'CatalogUrl' -Bound $b -Current $CatalogUrl -ConfigKey 'FirmwareCatalogUrl' -Config $cfg
-if (-not $CatalogUrl) { $CatalogUrl = 'downloads.dell.com' }
+if (-not $CatalogUrl) { $CatalogUrl = 'downloads.dell.com/Catalog' }
 $doHwPrep = ($FirmwareCheckOnly -or $UpdateFirmware -or $RecreateBossVd)
 if (-not $b.ContainsKey('iDRACIPs')) {
     if ($cfg.ContainsKey('Nodes')) { $iDRACIPs = @($cfg.Nodes | ForEach-Object { $_.iDRAC }) }

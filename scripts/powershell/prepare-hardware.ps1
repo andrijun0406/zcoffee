@@ -28,7 +28,8 @@ param(
     # Firmware
     [switch]$FirmwareCheckOnly,
     [switch]$UpdateFirmware,
-    [string]$CatalogUrl = 'downloads.dell.com',   # HTTPS repository host or DRM catalog host
+    [string]$CatalogUrl = 'downloads.dell.com/Catalog',  # HTTPS repository path (host/path), or a DRM catalog path
+    [string]$CatalogFile = 'Catalog.xml.gz',             # catalog file name in the repository
 
     # BOSS boot VD (destructive)
     [switch]$RecreateBossVd,
@@ -107,8 +108,8 @@ function Wait-RacadmJob {
 function Invoke-FirmwareCheck {
     Write-Host "== Firmware compliance check on $NodeIP (catalog: $CatalogUrl) =="
     Write-Host "  Requesting catalog comparison (non-destructive)..."
-    # -a FALSE : do not apply; --verifycatalog : just compare and build a report
-    $r = Invoke-RACADMRaw -CommandArguments @('update', '-t', 'HTTPS', '-e', $CatalogUrl, '-a', 'FALSE', '--verifycatalog')
+    # -f <catalog> -e <repo path> : where to read the catalog; -a FALSE + --verifycatalog : compare only, apply nothing
+    $r = Invoke-RACADMRaw -CommandArguments @('update', '-f', $CatalogFile, '-e', $CatalogUrl, '-t', 'HTTPS', '-a', 'FALSE', '--verifycatalog')
     Write-Host $r.Output
     Start-Sleep -Seconds 10
     Write-Host "  Comparison report (installed vs. available):"
@@ -120,8 +121,8 @@ function Invoke-FirmwareCheck {
 function Invoke-FirmwareUpdate {
     Write-Host "== Firmware update on $NodeIP (catalog: $CatalogUrl) =="
     Write-Warn2 "Firmware updates reboot the node and can take significant time over the network."
-    # -a FALSE : skip downgrades (do not roll back components newer than catalog)
-    $out = Invoke-RACADM -CommandArguments @('update', '-t', 'HTTPS', '-e', $CatalogUrl, '-a', 'FALSE')
+    # -a TRUE : apply applicable updates; --reboot : graceful reboot so staged updates complete
+    $out = Invoke-RACADM -CommandArguments @('update', '-f', $CatalogFile, '-e', $CatalogUrl, '-t', 'HTTPS', '-a', 'TRUE', '--reboot')
     Write-Host $out
     $jids = [regex]::Matches($out, 'JID_\d+') | ForEach-Object { $_.Value } | Select-Object -Unique
     if (-not $jids) {
