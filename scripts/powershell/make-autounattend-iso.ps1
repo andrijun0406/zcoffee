@@ -28,7 +28,7 @@
 [CmdletBinding()]
 param(
     [SecureString]$AdministratorPassword,
-    [string]$OutputIso = (Join-Path $PSScriptRoot 'autounattend.iso'),
+    [string]$OutputIso = (Join-Path $PSScriptRoot '..\..\isos\autounattend.iso'),
     [string]$TimeZone = 'SE Asia Standard Time',
     [string]$Locale = 'en-US',
     [string]$OwnerName = 'Azure Local Lab',
@@ -218,6 +218,11 @@ try {
     Write-Step ("Image ready: {0} blocks x {1} bytes (~{2} KB). Writing to disk..." -f `
         $totalBlocks, $blockSize, [math]::Round(($totalBlocks * $blockSize) / 1KB, 1))
 
+    $outDir = Split-Path -Parent $OutputIso
+    if ($outDir -and -not (Test-Path $outDir)) {
+        Write-Step "Creating output folder: $outDir"
+        New-Item -ItemType Directory -Path $outDir -Force | Out-Null
+    }
     if (Test-Path $OutputIso) {
         Write-Step "Removing existing $OutputIso before write..."
         Remove-Item $OutputIso -Force

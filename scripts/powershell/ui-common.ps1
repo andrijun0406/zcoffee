@@ -209,7 +209,12 @@ function Import-LabConfig {
     if ($script:LabConfigCache) { return $script:LabConfigCache }
 
     if (-not $Path) {
-        $Path = Join-Path $PSScriptRoot 'lab-config.psd1'
+        $Path = Join-Path $PSScriptRoot 'config\lab-config.psd1'
+        # Backward compatibility: fall back to the old location beside the scripts.
+        if (-not (Test-Path $Path)) {
+            $legacy = Join-Path $PSScriptRoot 'lab-config.psd1'
+            if (Test-Path $legacy) { $Path = $legacy }
+        }
     }
 
     if (-not (Test-Path $Path -PathType Leaf)) {

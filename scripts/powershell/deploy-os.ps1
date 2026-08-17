@@ -110,9 +110,9 @@ function Invoke-RACADM {
 function Remove-RemoteImage {
     param([Parameter(Mandatory)][string]$Slot)   # 'remoteimage' or 'remoteimage2'
 
-    $args = @('-r', $NodeIP, '-u', $iDRACUser, '-p', $iDRACPasswordPlain)
-    if ($NoCertWarn) { $args += '--nocertwarn' }
-    & $RacadmExe @args $Slot -d 2>&1 | Out-Null
+    $racArgs = @('-r', $NodeIP, '-u', $iDRACUser, '-p', $iDRACPasswordPlain)
+    if ($NoCertWarn) { $racArgs += '--nocertwarn' }
+    & $RacadmExe @racArgs $Slot -d 2>&1 | Out-Null
 }
 
 function Test-RACADMConnection {
