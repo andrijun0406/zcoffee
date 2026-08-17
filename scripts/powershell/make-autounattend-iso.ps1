@@ -38,6 +38,17 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
+# --- Verbose step helper (always prints, with elapsed time so a stall is obvious) ---
+$script:__t0 = Get-Date
+function Write-Step {
+    param([string]$Message, [string]$Color = 'Cyan')
+    $elapsed = (Get-Date) - $script:__t0
+    $stamp = '{0:mm\:ss}' -f $elapsed
+    Write-Host ("[{0}] {1}" -f $stamp, $Message) -ForegroundColor $Color
+}
+
+Write-Step "make-autounattend-iso starting. Output target: $OutputIso"
+
 function Test-PasswordComplexity {
     param([string]$Plain)
     $problems = @()
@@ -51,8 +62,10 @@ function Test-PasswordComplexity {
 
 # --- Acquire and validate the administrator password ---
 if (-not $PSBoundParameters.ContainsKey('AdministratorPassword') -or $null -eq $AdministratorPassword) {
+    Write-Step "Prompting for the local Administrator password (input is hidden)..." 'Yellow'
     $AdministratorPassword = Read-Host -Prompt 'Enter the local Administrator password to set (min 14 chars)' -AsSecureString
 }
+Write-Step "Password received; validating complexity..."
 
 $bstr = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($AdministratorPassword)
 try {
@@ -66,13 +79,16 @@ $issues = Test-PasswordComplexity -Plain $plain
 if (@($issues).Count -gt 0) {
     throw ("Password does not meet Azure Local complexity. It needs " + ($issues -join ', ') + '.')
 }
+Write-Step "Password meets complexity requirements." 'Green'
 
 # Windows unattend obfuscation for AdministratorPassword: base64( UTF16LE( password + 'AdministratorPassword' ) )
 $adminB64 = [Convert]::ToBase64String(
     [Text.Encoding]::Unicode.GetBytes($plain + 'AdministratorPassword'))
 $plain = $null
+Write-Step "Answer-file password encoded (base64 unattend obfuscation)."
 
 # --- Build the answer file ---
+Write-Step "Composing Autounattend.xml (locale=$Locale, timezone=$TimeZone)..."
 $xml = @"
 <?xml version="1.0" encoding="utf-8"?>
 <unattend xmlns="urn:schemas-microsoft-com:unattend">
@@ -140,10 +156,12 @@ $xml = @"
 
 # --- Stage the file, then build the ISO natively via IMAPI2 ---
 $staging = Join-Path ([IO.Path]::GetTempPath()) ("unattend_" + [Guid]::NewGuid().ToString('N'))
+Write-Step "Creating staging folder: $staging"
 New-Item -ItemType Directory -Path $staging -Force | Out-Null
 
 $writerType = 'AzLocalIso.IsoWriter'
 if (-not ($writerType -as [type])) {
+    Write-Step "First run: compiling native ISO writer helper (Add-Type -> csc.exe). This can take 10-30s..." 'Yellow'
     Add-Type -Language CSharp -TypeDefinition @'
 using System;
 using System.IO;
@@ -173,30 +191,53 @@ namespace AzLocalIso {
     }
 }
 '@
+    Write-Step "Native ISO writer helper compiled." 'Green'
+}
+else {
+    Write-Step "Native ISO writer helper already loaded; skipping compile."
 }
 
 try {
+    Write-Step "Writing Autounattend.xml into staging folder..."
     Set-Content -Path (Join-Path $staging 'Autounattend.xml') -Value $xml -Encoding UTF8
     # Some Setup variants look for lowercase; provide both for safety.
     Copy-Item (Join-Path $staging 'Autounattend.xml') (Join-Path $staging 'autounattend.xml') -Force
 
+    Write-Step "Creating IMAPI2 file system image COM object (IMAPI2FS.MsftFileSystemImage)..."
     $fsi = New-Object -ComObject IMAPI2FS.MsftFileSystemImage
     $fsi.FileSystemsToCreate = 3   # ISO9660 (1) + Joliet (2)
     $fsi.VolumeName = 'UNATTEND'
+    Write-Step "Adding staged files to the image tree..."
     $fsi.Root.AddTree($staging, $false)
 
+    Write-Step "Rendering ISO image stream (CreateResultImage)..."
     $result = $fsi.CreateResultImage()
-    if (Test-Path $OutputIso) { Remove-Item $OutputIso -Force }
-    [AzLocalIso.IsoWriter]::Create($OutputIso, $result.ImageStream, $result.BlockSize, $result.TotalBlocks)
+    $totalBlocks = $result.TotalBlocks
+    $blockSize = $result.BlockSize
+    Write-Step ("Image ready: {0} blocks x {1} bytes (~{2} KB). Writing to disk..." -f `
+        $totalBlocks, $blockSize, [math]::Round(($totalBlocks * $blockSize) / 1KB, 1))
+
+    if (Test-Path $OutputIso) {
+        Write-Step "Removing existing $OutputIso before write..."
+        Remove-Item $OutputIso -Force
+    }
+    [AzLocalIso.IsoWriter]::Create($OutputIso, $result.ImageStream, $blockSize, $totalBlocks)
 
     $sizeKb = [math]::Round((Get-Item $OutputIso).Length / 1KB, 1)
+    Write-Step "ISO write complete." 'Green'
+    Write-Host ""
     Write-Host "Created Autounattend ISO: $OutputIso ($sizeKb KB)" -ForegroundColor Green
     Write-Host "Time zone: $TimeZone   Locale: $Locale" -ForegroundColor Cyan
     Write-Host "Treat this ISO as a secret (it contains the obfuscated admin password)." -ForegroundColor Yellow
     Write-Host "It is covered by .gitignore; do not commit it." -ForegroundColor Yellow
 }
 finally {
+    Write-Step "Cleaning up staging folder and clearing sensitive variables..."
     Remove-Item -Path $staging -Recurse -Force -ErrorAction SilentlyContinue
+    if ($fsi) {
+        [void][Runtime.InteropServices.Marshal]::ReleaseComObject($fsi)
+    }
     $xml = $null
     $adminB64 = $null
+    Write-Step "Done." 'Green'
 }
