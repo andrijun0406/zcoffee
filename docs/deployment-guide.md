@@ -38,7 +38,7 @@ This guide maps the six-stage automation to the Dell AX System for Azure Local (
 ## Configuration source of truth
 
 > [!IMPORTANT]
-> All values (DNS, VLANs, gateway, cluster/resource names, node and iDRAC IPs, HTTP port, local admin) are defined once in `lab-config.psd1` and loaded by every stage. Passing a parameter overrides the config for that run. Compare `lab-config.psd1` with [`odin-config-report.md`](./odin-config-report.md) before deployment.
+> All values (DNS, VLANs, gateway, cluster/resource names, node and iDRAC IPs, HTTP port, local admin) are defined once in `config/lab-config.psd1` (under `scripts/powershell/`) and loaded by every stage. Passing a parameter overrides the config for that run. Compare `lab-config.psd1` with [`odin-config-report.md`](./odin-config-report.md) before deployment.
 
 ## Tooling prerequisites
 
@@ -71,7 +71,7 @@ Stage 1 can bring each node to a known-good state first, via `prepare-hardware.p
 
 - `-FirmwareCheckOnly` — non-destructive. Compares installed firmware against the catalog and prints an installed-vs-available report (`racadm update ... --verifycatalog` + `update viewreport`). Nothing is applied.
 - `-UpdateFirmware` — applies updates from the catalog (`-a FALSE`, no downgrades). Reboots the node and tracks the job to completion.
-- `-CatalogUrl <host>` — HTTPS catalog host. Defaults to `FirmwareCatalogUrl` in `lab-config.psd1` (`downloads.dell.com`).
+- `-CatalogUrl <host>` — HTTPS catalog host. Defaults to `FirmwareCatalogUrl` in `config/lab-config.psd1`.
 - `-RecreateBossVd` — DESTRUCTIVE. Discovers the BOSS controller, deletes existing VD(s), and creates a fresh RAID-1 boot VD named `OS`, committing via a power-cycle config job. Prompts for a typed confirmation (the node service tag) per node unless `-ForceHardwarePrep` is given.
 
 ```powershell
@@ -84,7 +84,7 @@ Stage 1 can bring each node to a known-good state first, via `prepare-hardware.p
 ```
 
 > [!WARNING]
-> `-RecreateBossVd` wipes the OS boot volume. It is intended for redeploy/reinstall, so the operator confirms per node by typing the service tag (from `lab-config.psd1`). Use `-ForceHardwarePrep` only for fully unattended reruns where data loss is already accepted.
+> `-RecreateBossVd` wipes the OS boot volume. It is intended for redeploy/reinstall, so the operator confirms per node by typing the service tag (from `config/lab-config.psd1`). Use `-ForceHardwarePrep` only for fully unattended reruns where data loss is already accepted.
 
 > [!IMPORTANT]
 > Firmware from `downloads.dell.com` is always-latest and can exceed the Dell Azure Local support matrix. For strict compliance, point `-CatalogUrl` at a Dell Repository Manager catalog pinned to the validated versions, and record the applied versions in the private runbook. Firmware update requires the iDRAC to have outbound HTTPS to the catalog host.
@@ -93,8 +93,8 @@ Stage 1 can bring each node to a known-good state first, via `prepare-hardware.p
 
 Defines management VLAN 230 and storage VLANs 711/712. Currently a guarded placeholder; `-Apply` intentionally stops until exact OS adapter names and Network ATC intents are confirmed.
 
-- Management/Compute intent on Integrated NIC1 Port 1-1 and Port 2-1 (10GbE).
-- Storage intent on SLOT 2 Port 1 and Port 2 (25GbE); RDMA/iWARP; storage auto-IP (`10.71.0.0/16`).
+- Management/Compute intent on Integrated NIC1 Port 1-1 and Port 2-1 (QLogic QL41232 2x25GbE rNDC).
+- Storage intent on SLOT 2 Port 1 and Port 2 (QLogic QL41262 2x25GbE); RDMA/iWARP; storage auto-IP (`10.71.0.0/16`).
 - Let Network ATC own host networking; avoid manual SET teams or storage vNICs.
 
 ## Stage 3 — Node preparation (`03-prepare-node.ps1`)

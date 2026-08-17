@@ -15,23 +15,26 @@ zcoffee/
 │   ├── troubleshooting.md
 │   └── odin-config-report.md
 ├── scripts/
-│   └── powershell/
-│       ├── lab-config.psd1            # single source of truth for lab values
-│       ├── bootstrap-cluster.ps1      # stage dispatcher (+ -UseGui)
-│       ├── ui-common.ps1              # shared progress dashboard / logging / GUI + config loader
-│       ├── preflight-os.ps1           # non-destructive OS prerequisite checks
-│       ├── deploy-os.ps1              # RACADM worker (mount ISO, optional boot)
-│       ├── serve-iso.ps1              # native PowerShell ISO HTTP server (no Python)
-│       ├── 01-deploy-os.ps1
-│       ├── 02-configure-network.ps1
-│       ├── 03-prepare-node.ps1
-│       ├── 04-register-arc.ps1
-│       ├── 05-deploy-azure-local.ps1
-│       └── 06-validate-cluster.ps1
+│   ├── powershell/
+│   │   ├── config/
+│   │   │   └── lab-config.psd1        # single source of truth for lab values
+│   │   ├── logs/                      # per-stage run logs (gitignored, auto-created)
+│   │   ├── bootstrap-cluster.ps1      # stage dispatcher (+ -UseGui)
+│   │   ├── ui-common.ps1              # shared dashboard / logging / GUI + config loader
+│   │   ├── preflight-os.ps1           # non-destructive OS prerequisite checks
+│   │   ├── deploy-os.ps1              # RACADM worker (mount ISO/RFS2, optional boot)
+│   │   ├── prepare-hardware.ps1       # firmware check/update + BOSS boot VD recreate
+│   │   ├── make-autounattend-iso.ps1  # builds Autounattend ISO into ../../isos/
+│   │   ├── serve-iso.ps1              # native PowerShell ISO HTTP server (no Python)
+│   │   ├── 01-deploy-os.ps1
+│   │   ├── 02-configure-network.ps1
+│   │   ├── 03-prepare-node.ps1
+│   │   ├── 04-register-arc.ps1
+│   │   ├── 05-deploy-azure-local.ps1
+│   │   └── 06-validate-cluster.ps1
 │   └── arm-templates/
 │       └── azure-local.parameters.example.json
-├── isos/                              # golden image (gitignored, never committed)
-└── logs/                              # per-stage run logs (gitignored)
+└── isos/                              # golden image + generated autounattend.iso (gitignored)
 ```
 
 ## Prerequisites
@@ -48,11 +51,11 @@ zcoffee/
 
 ## Configuration (single source of truth)
 
-All lab values live in `lab-config.psd1` (DNS, VLANs, gateway, cluster/resource names, node host and iDRAC IPs, HTTP port, local admin, subscription/tenant placeholders). Every stage loads it via `Import-LabConfig`.
+All lab values live in `scripts/powershell/config/lab-config.psd1` (DNS, VLANs, gateway, cluster/resource names, node host and iDRAC IPs, HTTP port, local admin, subscription/tenant placeholders). Every stage loads it via `Import-LabConfig`, which resolves the `config/` folder relative to the scripts.
 
 Precedence: an explicitly passed parameter overrides the config; otherwise the config value is used; otherwise a built-in fallback applies.
 
-Keep `lab-config.psd1` aligned with the ODIN config report (`docs/odin-config-report.md`). Compare the two before every deployment, since values such as DNS server IPs cannot change after deployment. Do not put secrets in `lab-config.psd1`.
+Keep `config/lab-config.psd1` aligned with the ODIN config report (`docs/odin-config-report.md`). Compare the two before every deployment, since values such as DNS server IPs cannot change after deployment. Do not put secrets in `lab-config.psd1`.
 
 ## Six-stage workflow
 

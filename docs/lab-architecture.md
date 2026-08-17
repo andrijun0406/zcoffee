@@ -9,7 +9,7 @@ The current Dell Azure Local **2606** support matrix and SBE release notes list 
 - 8 x 16GB RAM (128 GB)
 - 2 x 800GB SSD SAS (cache)
 - 6 x 2.4TB HDD (capacity)
-- rNDC (integrated): QLogic FastLinQ QL41232 2x25GbE — **Management/Compute** (confirmed via iDRAC `hwinventory`)
+- rNDC (integrated): QLogic FastLinQ QL41232 2x25GbE — **Management/Compute** (confirmed via iDRAC `hwinventory`; the original build sheet listed an Intel X710, but both nodes actually carry the QLogic QL41232)
 - LOM: Broadcom BCM5720 2 x 1GbE (unused / OOB helper)
 - PCIe (SLOT 2): QLogic FastLinQ QL41262 2x25GbE — **Storage**
 
@@ -30,12 +30,12 @@ The current Dell Azure Local **2606** support matrix and SBE release notes list 
 | SLOT 2 Port 1 | 25GbE | Yes | StorageNetwork1 (VLAN 711) |
 | SLOT 2 Port 2 | 25GbE | Yes | StorageNetwork2 (VLAN 712) |
 
-*\*Management/Compute runs on the QLogic QL41232 2x25GbE rNDC. Ports are 25GbE-capable; effective negotiated link speed depends on the ToR switch port. Update the ToR switch ports to 25GbE to run these at full speed.*
+*\*Management/Compute runs on the QLogic QL41232 2x25GbE rNDC. Ports are 25GbE-capable; effective negotiated link speed depends on the ToR switch port (the earlier ODIN report recorded these links negotiating at 10GbE). Update the ToR switch ports to 25GbE to run these at full speed.*
 
 ## Identity & security
 - Local Identity + Azure Key Vault (AD-less).
 - Local DNS zone: `zcoffee.com`.
-- DNS server (forwarder): **`10.8.230.51`**, defined in `lab-config.psd1`. Keep the ODIN config report aligned with this value (DNS cannot change post-deployment).
+- DNS server (forwarder): **`10.8.230.51`**, defined in `config/lab-config.psd1`. Keep the ODIN config report aligned with this value (DNS cannot change post-deployment).
 - Security baseline (Recommended): WDAC, Credential Guard, drift control, SMB signing, SMB cluster encryption, BitLocker on boot and data volumes.
 
 ## Infrastructure network
