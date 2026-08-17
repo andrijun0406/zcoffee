@@ -23,6 +23,10 @@ param(
     [int]$ServerLifetimeMinutes = 240,
     [switch]$NoWait,
 
+    # Optional Autounattend media (Stage 01 only). Mounted via iDRAC RFS2.
+    [string]$AutounattendIso,
+    [string]$AutounattendUrl,
+
     [string]$DnsServer,
     [switch]$Apply,
 

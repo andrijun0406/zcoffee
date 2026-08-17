@@ -7,8 +7,6 @@ param(
 
     [SecureString]$iDRACPassword,
 
-    [Parameter(Mandatory)]
-    [ValidatePattern('^https?://')]
     [string]$ISOUrl,
 
     [string]$RACADMPath = 'racadm',
@@ -17,8 +15,10 @@ param(
 
     [switch]$NoCertWarn,
 
-    [ValidatePattern('^https?://')]
-    [string]$AutounattendUrl
+    [string]$AutounattendUrl,
+
+    # Detach RFS1 (and RFS2) then exit. Leaves the iDRAC clean after a mount-only/check-only run.
+    [switch]$DetachOnly
 )
 
 Set-StrictMode -Version Latest
@@ -106,6 +106,15 @@ function Invoke-RACADM {
     return $output
 }
 
+# Best-effort detach; never throws (the slot may already be empty).
+function Remove-RemoteImage {
+    param([Parameter(Mandatory)][string]$Slot)   # 'remoteimage' or 'remoteimage2'
+
+    $args = @('-r', $NodeIP, '-u', $iDRACUser, '-p', $iDRACPasswordPlain)
+    if ($NoCertWarn) { $args += '--nocertwarn' }
+    & $RacadmExe @args $Slot -d 2>&1 | Out-Null
+}
+
 function Test-RACADMConnection {
     Write-Host "Testing iDRAC connectivity: $NodeIP"
 
@@ -123,14 +132,17 @@ if (-not $PSBoundParameters.ContainsKey('iDRACPassword') -or
         -AsSecureString
 }
 
-$uri = [Uri]::new($ISOUrl)
+# ISOUrl is required only when we are actually mounting.
+if (-not $DetachOnly) {
+    if (-not $ISOUrl) { throw 'ISOUrl is required unless -DetachOnly is specified.' }
 
-if ($uri.Host -in @('localhost', '127.0.0.1', '::1')) {
-    throw 'ISOUrl must use an address reachable from the iDRAC, not localhost.'
-}
-
-if ($uri.Scheme -notin @('http', 'https')) {
-    throw 'ISOUrl must use HTTP or HTTPS.'
+    $uri = [Uri]::new($ISOUrl)
+    if ($uri.Host -in @('localhost', '127.0.0.1', '::1')) {
+        throw 'ISOUrl must use an address reachable from the iDRAC, not localhost.'
+    }
+    if ($uri.Scheme -notin @('http', 'https')) {
+        throw 'ISOUrl must use HTTP or HTTPS.'
+    }
 }
 
 $RacadmExe = Resolve-RACADM -Path $RACADMPath
@@ -142,6 +154,21 @@ try {
 
     Write-Host "Using RACADM: $RacadmExe"
     Test-RACADMConnection
+
+    if ($DetachOnly) {
+        Write-Host "Detaching remote media on $NodeIP"
+        Remove-RemoteImage -Slot 'remoteimage2'
+        Remove-RemoteImage -Slot 'remoteimage'
+        Write-Host "Remote media detached on $NodeIP (RFS1/RFS2 cleared)."
+        return
+    }
+
+    # Make the mount idempotent: clear any stale share left by a prior run
+    # so 'remoteimage -c' does not fail with an already-enabled error.
+    Write-Host "Clearing any stale remote media on $NodeIP before mount"
+    Remove-RemoteImage -Slot 'remoteimage'
+    Remove-RemoteImage -Slot 'remoteimage2'
+    Start-Sleep -Seconds 2
 
     Write-Host "Mounting ISO on $NodeIP"
 
@@ -156,9 +183,6 @@ try {
 
     if ($AutounattendUrl) {
         Write-Host "Attaching Autounattend image via RFS2 on $NodeIP"
-        $detachArgs = @('-r', $NodeIP, '-u', $iDRACUser, '-p', $iDRACPasswordPlain)
-        if ($NoCertWarn) { $detachArgs += '--nocertwarn' }
-        & $RacadmExe @detachArgs remoteimage2 -d 2>&1 | Out-Null
         $null = Invoke-RACADM -CommandArguments @('remoteimage2', '-c', '-l', $AutounattendUrl)
         Write-Host "Autounattend image attached via RFS2 on $NodeIP"
     }

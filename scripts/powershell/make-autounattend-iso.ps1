@@ -156,6 +156,7 @@ $xml = @"
 
 # --- Stage the file, then build the ISO natively via IMAPI2 ---
 $staging = Join-Path ([IO.Path]::GetTempPath()) ("unattend_" + [Guid]::NewGuid().ToString('N'))
+$fsi = $null
 Write-Step "Creating staging folder: $staging"
 New-Item -ItemType Directory -Path $staging -Force | Out-Null
 
@@ -200,8 +201,8 @@ else {
 try {
     Write-Step "Writing Autounattend.xml into staging folder..."
     Set-Content -Path (Join-Path $staging 'Autounattend.xml') -Value $xml -Encoding UTF8
-    # Some Setup variants look for lowercase; provide both for safety.
-    Copy-Item (Join-Path $staging 'Autounattend.xml') (Join-Path $staging 'autounattend.xml') -Force
+    # Windows Setup matches the file name case-insensitively, so a single
+    # Autounattend.xml at the media root is sufficient.
 
     Write-Step "Creating IMAPI2 file system image COM object (IMAPI2FS.MsftFileSystemImage)..."
     $fsi = New-Object -ComObject IMAPI2FS.MsftFileSystemImage
@@ -233,7 +234,9 @@ try {
 }
 finally {
     Write-Step "Cleaning up staging folder and clearing sensitive variables..."
-    Remove-Item -Path $staging -Recurse -Force -ErrorAction SilentlyContinue
+    if ($staging) {
+        Remove-Item -Path $staging -Recurse -Force -ErrorAction SilentlyContinue
+    }
     if ($fsi) {
         [void][Runtime.InteropServices.Marshal]::ReleaseComObject($fsi)
     }
