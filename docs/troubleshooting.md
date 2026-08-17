@@ -15,6 +15,7 @@ Each stage writes a timestamped log to `logs/<stage>-<yyyyMMdd-HHmmss>.log` and 
 | BOSS "fewer than 2 physical disks" | (fixed) parser now reads `Disk.Direct` AHCI disks | Ensure you're on the current `prepare-hardware.ps1` |
 | Setup asks for a "media driver" mid-install | ISO was detached while installing | Never run a second (mount-only) bootstrap during an install — it detaches media on all targeted nodes. Re-run `-OnlyNode <n> -StartInstallation` |
 | ISO hash mismatch | Wrong or corrupt ISO | Re-download the Dell Golden Image; verify `-ExpectedISOHash` |
+| **"No compatible bootloader available"** (or boots via iDRAC HTML5 native Map CD/DVD but NOT via the script) | **Single-threaded `serve-iso.ps1`** could not satisfy the iDRAC boot-time streaming pattern (many concurrent HTTP Range reads) | Use the current multi-threaded, Range-aware `serve-iso.ps1`. See below. |
 
 ### Secure Boot boot failure (known issue, confirmed on this lab)
 Symptom: the Golden Image will not boot from the Virtual Optical Drive even when selected manually via F11; the node reports `Boot Failed: Virtual Optical Drive` almost immediately.
@@ -35,6 +36,23 @@ Then run the install. After the OS is on and BIOS is updated (1.4.4 → 1.21.1),
 .\bootstrap-cluster.ps1 -Stage 01-deploy-os -OnlyNode <iDRAC-or-name> -EnableSecureBoot -NoCertWarn
 ```
 Keep `BootMode = Uefi` throughout — never switch to BIOS/Legacy. Only one bootstrap window at a time.
+
+### "No compatible bootloader" — ISO boots via native Map but not via the script (confirmed, fixed)
+Symptom: with Secure Boot **Disabled** and the ISO **mounted** (`racadm remoteimage -s` shows Enabled), the node still fails to boot the Virtual Optical Drive — often reporting `no compatible bootloader available`. The **same ISO, same PC, same Sangfor VPN** boots fine when mapped through the iDRAC HTML5 **Virtual Console → Virtual Media → Map CD/DVD**.
+
+How to tell this apart from the Secure Boot failure:
+- Secure Boot failure: `Boot Failed` **immediately**, and `get BIOS.SysSecurity.SecureBoot` returns **Enabled**.
+- This failure: Secure Boot is **Disabled**, media is **mounted**, native Map CD/DVD **boots**, but the scripted `racadm remoteimage` path does not.
+
+Root cause: mounting an ISO needs only light reads (headers/directory), so a simple server can mount it. **Booting** is different — UEFI issues sustained, concurrent HTTP **Range** requests. The original single-threaded `HttpListener` loop processed one request at a time, so boot-time range reads queued and timed out, and UEFI saw a truncated/unreadable boot image. The iDRAC HTML5 native map works because it streams over the iDRAC's own console channel, not our HTTP server.
+
+Fix: `serve-iso.ps1` is now **multi-threaded** (runspace pool, up to 24 parallel requests), with correct `206 Partial Content` / `Content-Range` handling, HTTP/1.1 keep-alive, and client-disconnect tolerance. No change to how you run Stage 1 — the orchestrator launches it the same way.
+
+Fallbacks if the scripted boot still fails on a given node:
+1. iDRAC HTML5 **Virtual Console → Virtual Media → Map CD/DVD** to the local ISO, then set next boot to Virtual CD/DVD. (Proven to work over the VPN.)
+2. Run Stage 1 from a **jump host inside `10.8.230.0/24`** (`-HttpHost 10.8.230.225`) to remove VPN latency from the boot stream entirely.
+
+Note: the earlier Secure Boot section's "not an HTTP-server problem" statement applies to *that* symptom (immediate Boot Failed with Secure Boot Enabled). This is a distinct, separately-fixed HTTP-server issue.
 
 ## Stage 2 — Host networking
 | Symptom | Likely cause | Fix |
