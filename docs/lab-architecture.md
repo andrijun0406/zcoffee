@@ -9,25 +9,28 @@ The current Dell Azure Local **2606** support matrix and SBE release notes list 
 - 8 x 16GB RAM (128 GB)
 - 2 x 800GB SSD SAS (cache)
 - 6 x 2.4TB HDD (capacity)
-- rNDC: Intel X710 2x10GbE + 2 x 1GbE
-- PCIe: QLogic FastLinQ 41262 2x10/25GbE
+- rNDC (integrated): QLogic FastLinQ QL41232 2x25GbE — **Management/Compute** (confirmed via iDRAC `hwinventory`)
+- LOM: Broadcom BCM5720 2 x 1GbE (unused / OOB helper)
+- PCIe (SLOT 2): QLogic FastLinQ QL41262 2x25GbE — **Storage**
 
 ## Network topology (switchless storage)
-- **Management/Compute**: Integrated NIC1 Port 1-1 and Port 2-1 (Intel X710 10GbE) to the ToR switch, VLAN 230, `10.8.230.0/24`.
+- **Management/Compute**: Integrated NIC1 Port 1-1 and Port 2-1 (QLogic FastLinQ QL41232 2x25GbE rNDC) to the ToR switch, VLAN 230, `10.8.230.0/24`.
 - **Storage**: QLogic FastLinQ 41262, two 25GbE links connected **back-to-back** between nodes.
   - StorageNetwork1: SLOT 2 Port 1, VLAN 711
   - StorageNetwork2: SLOT 2 Port 2, VLAN 712
   - RDMA enabled; the FastLinQ 41262 is validated with **iWARP** (not RoCE).
   - No default gateway on storage; storage IPs assigned automatically by Network ATC.
-- Switchless storage covers only east-west storage traffic. Management, compute, DNS, Arc, and VM traffic still use the switched 10GbE network.
+- Switchless storage covers only east-west storage traffic. Management, compute, DNS, Arc, and VM traffic still use the switched network (QLogic QL41232 rNDC ports on the ToR switch).
 
 ### Port configuration (from ODIN config report)
 | OS adapter name | Speed | RDMA | Role |
 |-----------------|-------|------|------|
-| Integrated NIC1 Port 1-1 | 10GbE | No | Management + Compute |
-| Integrated NIC1 Port 2-1 | 10GbE | No | Management + Compute |
+| Integrated NIC1 Port 1-1 | 25GbE* | No | Management + Compute |
+| Integrated NIC1 Port 2-1 | 25GbE* | No | Management + Compute |
 | SLOT 2 Port 1 | 25GbE | Yes | StorageNetwork1 (VLAN 711) |
 | SLOT 2 Port 2 | 25GbE | Yes | StorageNetwork2 (VLAN 712) |
+
+*\*Management/Compute runs on the QLogic QL41232 2x25GbE rNDC. Ports are 25GbE-capable; effective negotiated link speed depends on the ToR switch port. Update the ToR switch ports to 25GbE to run these at full speed.*
 
 ## Identity & security
 - Local Identity + Azure Key Vault (AD-less).

@@ -28,7 +28,7 @@ This guide maps the six-stage automation to the Dell AX System for Azure Local (
 ## Pre-deployment
 
 - Register a Partner Admin Link (PAL) for Azure solutions.
-- Verify cabling: 25GbE back-to-back for storage (SLOT 2 Port 1/2), 10GbE for management/compute (Integrated NIC1 Port 1-1/2-1).
+- Verify cabling: 25GbE back-to-back for storage (QLogic QL41262, SLOT 2 Port 1/2), 25GbE to the ToR switch for management/compute (QLogic QL41232 rNDC, Integrated NIC1 Port 1-1/2-1).
 - Confirm VLAN/IP layout:
     - VLAN 230 → Management/Compute (`10.8.230.0/24`)
     - VLAN 711 → StorageNetwork1 (SLOT 2 Port 1)
