@@ -43,6 +43,9 @@ if (-not $HttpPort) { $HttpPort = 8080 }
 $CatalogUrl = Resolve-Setting -Name 'CatalogUrl' -Bound $b -Current $CatalogUrl -ConfigKey 'FirmwareCatalogUrl' -Config $cfg
 if (-not $CatalogUrl) { $CatalogUrl = 'downloads.dell.com/Catalog' }
 $doHwPrep = ($FirmwareCheckOnly -or $UpdateFirmware -or $RecreateBossVd)
+# ISO is only needed when installing, or on a plain (non-hardware-prep) run used to test mounting.
+# A hardware-prep-only run (e.g. -FirmwareCheckOnly) without -StartInstallation never touches the ISO.
+$isoNeeded = ($StartInstallation -or (-not $doHwPrep))
 if (-not $b.ContainsKey('iDRACIPs')) {
     if ($cfg.ContainsKey('Nodes')) { $iDRACIPs = @($cfg.Nodes | ForEach-Object { $_.iDRAC }) }
     else { $iDRACIPs = @('10.8.230.84','10.8.230.86') }
@@ -60,8 +63,9 @@ function Get-ManagementHostAddress {
     return $address
 }
 
-$totalSteps = 6
+$totalSteps = 3   # admin, preflight, credentials
 if ($doHwPrep) { $totalSteps++ }
+if ($isoNeeded) { $totalSteps += 3 }   # ISO server prep, start server, mount
 Initialize-Ui -StageName '01-deploy-os' -TotalSteps $totalSteps -UseGui:$UseGui
 $serverProcess = $null
 $script:autoUrlEffective = $null
@@ -79,22 +83,27 @@ try {
         $preflight = Join-Path $PSScriptRoot 'preflight-os.ps1'
         if (-not (Test-Path $preflight -PathType Leaf)) { throw "Missing preflight script: $preflight" }
 
-        if (-not $script:ISOFile) {
-            $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path
-            $script:ISOFile = Join-Path $repoRoot `
-                'isos\AzureLocal24H2.26100.32230.LCM.12.2604.1.3008_DellSBE.5.0.2606.1510_15G-Intel_A01.en-us.iso'
-            Write-Info "Using default ISO path: $script:ISOFile"
-        }
-        if (-not $script:ISOUrl -and -not $script:HttpHost) {
-            $script:HttpHost = Get-ManagementHostAddress
-            Write-Info "Auto-selected HTTP host: $script:HttpHost"
+        if ($script:isoNeeded) {
+            if (-not $script:ISOFile) {
+                $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path
+                $script:ISOFile = Join-Path $repoRoot `
+                    'isos\AzureLocal24H2.26100.32230.LCM.12.2604.1.3008_DellSBE.5.0.2606.1510_15G-Intel_A01.en-us.iso'
+                Write-Info "Using default ISO path: $script:ISOFile"
+            }
+            if (-not $script:ISOUrl -and -not $script:HttpHost) {
+                $script:HttpHost = Get-ManagementHostAddress
+                Write-Info "Auto-selected HTTP host: $script:HttpHost"
+            }
         }
 
         Write-Info "iDRAC targets from config: $($script:iDRACIPs -join ', ')"
-        if ($script:ISOUrl) {
+        if (-not $script:isoNeeded) {
+            Write-Info 'Hardware-prep-only run; ISO checks are skipped.'
+            & $preflight -SkipIso -RACADMPath $script:RACADMPath -iDRACIPs $script:iDRACIPs
+        }
+        elseif ($script:ISOUrl) {
             Write-Info "ISO provided via URL; local HTTP server will be skipped."
-            & $preflight -ISOUrl $script:ISOUrl -RACADMPath $script:RACADMPath -iDRACIPs $script:iDRACIPs `
-                -ISOFile 'unused' -HttpHost '0.0.0.0'
+            & $preflight -ISOUrl $script:ISOUrl -RACADMPath $script:RACADMPath -iDRACIPs $script:iDRACIPs
         }
         else {
             & $preflight `
@@ -141,6 +150,7 @@ try {
         }
     }
 
+    if ($isoNeeded) {
     Invoke-Step 'Prepare native PowerShell ISO server (no Python needed)' {
         if ($script:ISOUrl) { Write-Info 'ISOUrl supplied; skipping local HTTP server.'; return }
         $script:serveScript = Join-Path $PSScriptRoot 'serve-iso.ps1'
@@ -231,7 +241,12 @@ try {
         }
     }
 
-    if ($script:ISOUrl) {
+    }  # end if ($isoNeeded) ISO server+mount
+
+    if (-not $isoNeeded) {
+        Write-Info 'Hardware-prep-only run complete; no ISO was mounted, nothing to detach.'
+    }
+    elseif ($script:ISOUrl) {
         Write-Info 'External ISO URL in use; no local server to keep alive.'
     }
     elseif ($StartInstallation -and -not $NoWait) {
@@ -247,7 +262,18 @@ try {
         Write-Warn 'NoWait selected; ISO server stops now. Nodes may fail to read the image mid-install.'
     }
     else {
-        Write-Info 'ISO mounted but installation not started. Server will stop now.'
+        Write-Info 'ISO mounted but installation not started. Detaching remote media so re-runs stay clean.'
+        $worker = Join-Path $PSScriptRoot 'deploy-os.ps1'
+        foreach ($node in $script:iDRACIPs) {
+            try {
+                & $worker -NodeIP $node -iDRACUser $script:iDRACUser -iDRACPassword $script:iDRACPassword `
+                    -RACADMPath $script:RACADMPath -NoCertWarn:$script:NoCertWarn -DetachOnly
+                Write-Ok "Remote media detached: $node"
+            }
+            catch {
+                Write-Warn "Could not detach remote media on $node : $($_.Exception.Message)"
+            }
+        }
         Write-Info 'Re-run with -StartInstallation to set one-time VCD-DVD boot and power-cycle the nodes.'
     }
 
