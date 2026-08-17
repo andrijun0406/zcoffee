@@ -6,9 +6,15 @@ Runs BEFORE OS deployment. Two independent, opt-in operations:
   1. Firmware compliance:
      -FirmwareCheckOnly : compare installed firmware to a catalog (non-destructive report)
      -UpdateFirmware    : apply updates from the catalog (reboots the node)
+     -UpdateBios        : apply a SINGLE BIOS DUP only (targeted; does not touch other components)
+     -UpdateIdrac       : apply a SINGLE iDRAC DUP only (targeted; iDRAC self-reboots)
 
   2. BOSS boot virtual disk (DESTRUCTIVE):
      -RecreateBossVd    : delete existing BOSS VD(s) and create a fresh RAID-1 OS boot VD
+
+  3. Secure Boot (UEFI):
+     -DisableSecureBoot : TEMP install workaround for old BIOS cert stores (BIOS job + reboot)
+     -EnableSecureBoot  : re-enable after a BIOS update (required for the validated cluster)
 
 Called by 01-deploy-os.ps1 once per node iDRAC. Can also be run standalone.
 
@@ -31,10 +37,31 @@ param(
     [string]$CatalogUrl = 'downloads.dell.com/Catalog',  # HTTPS repository path (host/path), or a DRM catalog path
     [string]$CatalogFile = 'Catalog.xml.gz',             # catalog file name in the repository
 
+    # BIOS-only targeted update (single DUP). Use this to refresh the BIOS/Secure Boot certificate
+    # store WITHOUT pulling every other component to catalog-latest (which can overshoot the
+    # Dell Azure Local support matrix). Point at a specific BIOS Dell Update Package (.EXE).
+    [switch]$UpdateBios,                                   # apply a single BIOS DUP (reboots the node)
+    [string]$BiosDupFile,                                  # BIOS DUP file name, e.g. BIOS_xxxxx_WN64_1.21.1.EXE
+    [string]$BiosRepoUrl,                                  # HTTP/HTTPS repo path hosting the BIOS DUP (host/path)
+    [string]$BiosRepoProtocol = 'HTTPS',                   # HTTP or HTTPS
+
+    # iDRAC-only targeted update (single DUP). Mirrors -UpdateBios: refresh just the iDRAC/LC
+    # firmware without pulling every component to catalog-latest. iDRAC 7.30.x already supports
+    # dual RFS media, so this is for future maintenance, not required to install.
+    [switch]$UpdateIdrac,                                  # apply a single iDRAC DUP (iDRAC self-reboots)
+    [string]$IdracDupFile,                                 # iDRAC DUP file name, e.g. iDRAC_xxxxx_WN64_7.30.30.51.EXE
+    [string]$IdracRepoUrl,                                 # HTTP/HTTPS repo path hosting the iDRAC DUP (host/path)
+    [string]$IdracRepoProtocol = 'HTTPS',                  # HTTP or HTTPS
+
     # BOSS boot VD (destructive)
     [switch]$RecreateBossVd,
     [string]$BossRaidLevel = 'r1',
     [switch]$Force,               # skip the interactive destructive confirmation
+
+    # Secure Boot (UEFI). Old BIOS cert stores can reject a newly-signed Golden Image bootloader,
+    # causing "Boot Failed: Virtual Optical Drive". Disable to install, re-enable after BIOS update.
+    [switch]$DisableSecureBoot,   # set SecureBoot=Disabled (BIOS config job + power-cycle)
+    [switch]$EnableSecureBoot,    # set SecureBoot=Enabled  (required for the validated Azure Local cluster)
 
     # Context (for messages / confirmation)
     [string]$NodeName = '',
@@ -133,6 +160,43 @@ function Invoke-FirmwareUpdate {
     Write-Host "  Firmware update job(s) finished on $NodeIP."
 }
 
+function Invoke-BiosUpdate {
+    if (-not $BiosDupFile) { throw "-UpdateBios requires -BiosDupFile (the BIOS DUP file name, e.g. BIOS_xxxxx_WN64_1.21.1.EXE)." }
+    if (-not $BiosRepoUrl) { throw "-UpdateBios requires -BiosRepoUrl (HTTP/HTTPS repo path hosting the BIOS DUP)." }
+    Write-Host "== BIOS-only update on $NodeIP =="
+    Write-Host "  DUP: $BiosDupFile   Repo: $BiosRepoProtocol://$BiosRepoUrl"
+    Write-Warn2 "BIOS update reboots the node and can take several minutes."
+    # Install a single DUP: -f <dup> -e <repo> -t <proto> -a TRUE apply; --reboot so the staged update completes
+    $out = Invoke-RACADM -CommandArguments @('update', '-f', $BiosDupFile, '-e', $BiosRepoUrl, '-t', $BiosRepoProtocol, '-a', 'TRUE', '--reboot')
+    Write-Host $out
+    $jids = [regex]::Matches($out, 'JID_\d+') | ForEach-Object { $_.Value } | Select-Object -Unique
+    if (-not $jids) {
+        Write-Host "  No BIOS update job was created. The BIOS may already match this DUP version."
+        return
+    }
+    foreach ($j in $jids) { Wait-RacadmJob -JobId $j -TimeoutMinutes $JobTimeoutMinutes }
+    Write-Host "  BIOS update job(s) finished on $NodeIP. Re-enable Secure Boot with -EnableSecureBoot when ready."
+}
+
+function Invoke-IdracUpdate {
+    if (-not $IdracDupFile) { throw "-UpdateIdrac requires -IdracDupFile (the iDRAC DUP file name, e.g. iDRAC_xxxxx_WN64_7.30.30.51.EXE)." }
+    if (-not $IdracRepoUrl) { throw "-UpdateIdrac requires -IdracRepoUrl (HTTP/HTTPS repo path hosting the iDRAC DUP)." }
+    Write-Host "== iDRAC-only update on $NodeIP =="
+    Write-Host "  DUP: $IdracDupFile   Repo: $IdracRepoProtocol://$IdracRepoUrl"
+    Write-Warn2 "iDRAC update reboots the iDRAC itself; connectivity drops briefly during the update."
+    # Install a single DUP: -f <dup> -e <repo> -t <proto> -a TRUE apply. iDRAC firmware applies immediately
+    # and the iDRAC self-reboots; no host --reboot flag is needed.
+    $out = Invoke-RACADM -CommandArguments @('update', '-f', $IdracDupFile, '-e', $IdracRepoUrl, '-t', $IdracRepoProtocol, '-a', 'TRUE')
+    Write-Host $out
+    $jids = [regex]::Matches($out, 'JID_\d+') | ForEach-Object { $_.Value } | Select-Object -Unique
+    if (-not $jids) {
+        Write-Host "  No iDRAC update job was created. The iDRAC may already match this DUP version."
+        return
+    }
+    foreach ($j in $jids) { Wait-RacadmJob -JobId $j -TimeoutMinutes $JobTimeoutMinutes }
+    Write-Host "  iDRAC update job(s) finished on $NodeIP."
+}
+
 function Write-Warn2 { param([string]$m) Write-Host "  WARNING: $m" -ForegroundColor Yellow }
 
 # ---------------- BOSS boot VD ----------------
@@ -161,11 +225,15 @@ function Get-StorageFqdds {
     param([Parameter(Mandatory)][ValidateSet('vdisks','pdisks')][string]$Type,
           [Parameter(Mandatory)][string]$ControllerFqdd)
     $r = Invoke-RACADMRaw -CommandArguments @('storage', 'get', $Type, '--refkey', $ControllerFqdd)
+    # FQDD forms this must handle:
+    #   VD:                    Disk.Virtual.0:AHCI.SL.6-1
+    #   PD (BOSS/AHCI M.2):    Disk.Direct.0-0:AHCI.SL.6-1   <-- BOSS SSDs live here
+    #   PD (PERC/backplane):   Disk.Bay.0:Enclosure.Internal.0-1:RAID.SL.3-1
+    $pattern = if ($Type -eq 'vdisks') { '^Disk\.Virtual\.' } else { '^Disk\.(Direct|Bay)\.' }
     $items = @()
     foreach ($line in ($r.Output -split "`n")) {
         $t = $line.Trim()
-        # VD FQDD: Disk.Virtual.0:AHCI.Slot.6-1 ; PD FQDD: Disk.Bay.0:Enclosure...:AHCI.Slot.6-1
-        if ($t -match '^Disk\.(Virtual|Bay)\..+') { $items += $t }
+        if ($t -match $pattern) { $items += $t }
     }
     return , $items
 }
@@ -182,18 +250,12 @@ function Invoke-RecreateBossVd {
 
     if ($pds.Count -lt 2) { throw "BOSS controller reports fewer than 2 physical disks; cannot build $BossRaidLevel. Found: $($pds.Count)." }
 
-    # ---- Destructive confirmation ----
-    if (-not $Force) {
-        $label = if ($ServiceTag) { $ServiceTag } elseif ($NodeName) { $NodeName } else { $NodeIP }
-        Write-Host ''
-        Write-Host "  !! DESTRUCTIVE: this DELETES all BOSS virtual disks on $NodeIP and wipes the OS boot volume." -ForegroundColor Red
-        Write-Host "  !! Node: $NodeName  ServiceTag: $ServiceTag  iDRAC: $NodeIP" -ForegroundColor Red
-        $answer = Read-Host "  To proceed, type the node identifier exactly ($label)"
-        if ($answer -ne $label) { throw "Confirmation mismatch (expected '$label'). Aborting BOSS recreation on $NodeIP." }
-    }
-    else {
-        Write-Host "  -Force supplied; skipping interactive confirmation." -ForegroundColor Yellow
-    }
+    # ---- Destructive action notice (no prompt) ----
+    # Passing -RecreateBossVd is itself the explicit opt-in; we do NOT prompt.
+    Write-Host ''
+    Write-Host "  !! DESTRUCTIVE: deleting all BOSS virtual disks on $NodeIP and wiping the OS boot volume." -ForegroundColor Red
+    Write-Host "  !! Node: $NodeName  ServiceTag: $ServiceTag  iDRAC: $NodeIP" -ForegroundColor Red
+    Write-Host "  Proceeding automatically (-RecreateBossVd was supplied)." -ForegroundColor Yellow
 
     # ---- Delete existing VDs, then commit with a power-cycle job ----
     if ($vds.Count -gt 0) {
@@ -222,9 +284,61 @@ function Invoke-RecreateBossVd {
     Write-Host "  BOSS boot VD ready on $NodeIP : $([string]::Join(', ', $vds2))"
 }
 
+# ---------------- Secure Boot (UEFI) ----------------
+
+function Get-SecureBootState {
+    # Returns 'Enabled' | 'Disabled' | 'Unknown'
+    $r = Invoke-RACADMRaw -CommandArguments @('get', 'BIOS.SysSecurity.SecureBoot')
+    foreach ($line in ($r.Output -split "`n")) {
+        if ($line -match 'SecureBoot\s*=\s*(\w+)') { return $Matches[1].Trim() }
+    }
+    return 'Unknown'
+}
+
+function Get-BootMode {
+    $r = Invoke-RACADMRaw -CommandArguments @('get', 'BIOS.BiosBootSettings.BootMode')
+    foreach ($line in ($r.Output -split "`n")) {
+        if ($line -match 'BootMode\s*=\s*(\w+)') { return $Matches[1].Trim() }
+    }
+    return 'Unknown'
+}
+
+function Set-SecureBoot {
+    param([Parameter(Mandatory)][ValidateSet('Enabled','Disabled')][string]$Desired)
+
+    $mode = Get-BootMode
+    Write-Host "  BootMode: $mode   (Azure Local requires UEFI; do NOT switch to BIOS/Legacy)"
+    if ($mode -notmatch '(?i)uefi') {
+        Write-Warn2 "BootMode is '$mode', not UEFI. Secure Boot only applies in UEFI mode."
+    }
+
+    $current = Get-SecureBootState
+    Write-Host "== Secure Boot on $NodeIP : current=$current desired=$Desired =="
+    if ($current -eq $Desired) {
+        Write-Host "  Secure Boot already $Desired. No change."
+        return
+    }
+
+    if ($Desired -eq 'Disabled') {
+        Write-Host "  !! Disabling Secure Boot is a TEMPORARY install workaround." -ForegroundColor Yellow
+        Write-Host "  !! Re-enable it (and update BIOS) before Stage 5 cluster deployment." -ForegroundColor Yellow
+    }
+
+    $null = Invoke-RACADM -CommandArguments @('set', 'BIOS.SysSecurity.SecureBoot', $Desired)
+    # Commit the pending BIOS change via a config job + power-cycle
+    $out = Invoke-RACADM -CommandArguments @('jobqueue', 'create', 'BIOS.Setup.1-1', '-r', 'pwrcycle', '-s', 'TIME_NOW')
+    $jid = ([regex]::Match($out, 'JID_\d+')).Value
+    if (-not $jid) { throw "Could not obtain a BIOS config job ID on $NodeIP.`n$out" }
+    Wait-RacadmJob -JobId $jid -TimeoutMinutes $JobTimeoutMinutes
+
+    $after = Get-SecureBootState
+    if ($after -ne $Desired) { throw "Secure Boot is '$after' after the config job; expected '$Desired' on $NodeIP." }
+    Write-Host "  Secure Boot is now $after on $NodeIP."
+}
+
 # ---------------- Main ----------------
 
-if (-not ($FirmwareCheckOnly -or $UpdateFirmware -or $RecreateBossVd)) {
+if (-not ($FirmwareCheckOnly -or $UpdateFirmware -or $RecreateBossVd -or $DisableSecureBoot -or $EnableSecureBoot)) {
     Write-Host "No hardware-prep action requested for $NodeIP (nothing to do)."
     return
 }
@@ -242,9 +356,22 @@ try {
     $null = Invoke-RACADM -CommandArguments @('getsysinfo')
     Write-Host "iDRAC connectivity verified: $NodeIP"
 
-    if ($FirmwareCheckOnly) { Invoke-FirmwareCheck }
-    if ($UpdateFirmware)    { Invoke-FirmwareUpdate }
-    if ($RecreateBossVd)    { Invoke-RecreateBossVd }
+    if ($DisableSecureBoot -and $EnableSecureBoot) {
+        throw "Specify only one of -DisableSecureBoot or -EnableSecureBoot for $NodeIP."
+    }
+
+    # Order matters:
+    #   1. Firmware update first (refreshes the Secure Boot certificate store).
+    #   2. BOSS recreate (clean boot target).
+    #   3. Secure Boot change last: DisableSecureBoot right before an install boot;
+    #      EnableSecureBoot as a post-firmware hardening step.
+    if ($UpdateFirmware)     { Invoke-FirmwareUpdate }
+    if ($UpdateBios)         { Invoke-BiosUpdate }
+    if ($UpdateIdrac)        { Invoke-IdracUpdate }
+    if ($FirmwareCheckOnly)  { Invoke-FirmwareCheck }
+    if ($RecreateBossVd)     { Invoke-RecreateBossVd }
+    if ($DisableSecureBoot)  { Set-SecureBoot -Desired 'Disabled' }
+    if ($EnableSecureBoot)   { Set-SecureBoot -Desired 'Enabled' }
 
     Write-Host "Hardware preparation finished for $NodeIP."
 }

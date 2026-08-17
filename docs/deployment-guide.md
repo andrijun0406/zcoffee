@@ -71,8 +71,11 @@ Stage 1 can bring each node to a known-good state first, via `prepare-hardware.p
 
 - `-FirmwareCheckOnly` — non-destructive. Compares installed firmware against the catalog and prints an installed-vs-available report (`racadm update ... --verifycatalog` + `update viewreport`). Nothing is applied.
 - `-UpdateFirmware` — applies updates from the catalog (`-a FALSE`, no downgrades). Reboots the node and tracks the job to completion.
+- `-UpdateBios` — applies a SINGLE BIOS DUP only (`-BiosDupFile` + `-BiosRepoUrl`), not the whole catalog. Use this to refresh just the BIOS and its Secure Boot certificate store — enough to fix the "Boot Failed: Virtual Optical Drive" issue — without pushing NICs/backplane/disks past the support matrix. Reboots the node and tracks the job.
 - `-CatalogUrl <host>` — HTTPS catalog host. Defaults to `FirmwareCatalogUrl` in `config/lab-config.psd1`.
-- `-RecreateBossVd` — DESTRUCTIVE. Discovers the BOSS controller, deletes existing VD(s), and creates a fresh RAID-1 boot VD named `OS`, committing via a power-cycle config job. Prompts for a typed confirmation (the node service tag) per node unless `-ForceHardwarePrep` is given.
+- `-RecreateBossVd` — DESTRUCTIVE. Discovers the BOSS controller (reads the M.2 SSDs as `Disk.Direct.*` on the AHCI controller), deletes existing VD(s), and creates a fresh RAID-1 boot VD named `OS`, committing via a power-cycle config job. Supplying the flag is the confirmation — it proceeds without prompting on every targeted node.
+- `-DisableSecureBoot` / `-EnableSecureBoot` — set UEFI Secure Boot state via a BIOS config job + reboot. Disable as a temporary install workaround on old BIOS; re-enable after a BIOS update (Secure Boot is required for the validated cluster). BootMode stays UEFI.
+- `-OnlyNode <iDRAC-IP | name | host-IP>` — scope the entire stage (preflight, hardware prep, mount, boot) to a single node. Omit to target all nodes from config.
 
 ```powershell
 # Check firmware only (safe, no changes)
@@ -84,10 +87,26 @@ Stage 1 can bring each node to a known-good state first, via `prepare-hardware.p
 ```
 
 > [!WARNING]
-> `-RecreateBossVd` wipes the OS boot volume. It is intended for redeploy/reinstall, so the operator confirms per node by typing the service tag (from `config/lab-config.psd1`). Use `-ForceHardwarePrep` only for fully unattended reruns where data loss is already accepted.
+> `-RecreateBossVd` wipes the OS boot volume on every targeted node. There is no prompt — the flag itself is the confirmation. Use `-OnlyNode` to limit the blast radius to one node. It only touches the BOSS boot pair; the PERC data/cache disks are untouched.
 
 > [!IMPORTANT]
 > Firmware from `downloads.dell.com` is always-latest and can exceed the Dell Azure Local support matrix. For strict compliance, point `-CatalogUrl` at a Dell Repository Manager catalog pinned to the validated versions, and record the applied versions in the private runbook. Firmware update requires the iDRAC to have outbound HTTPS to the catalog host.
+
+### Secure Boot and the Golden Image boot failure
+
+On very old BIOS, UEFI Secure Boot can reject the newly-signed Golden Image bootloader, so the node reports `Boot Failed: Virtual Optical Drive` even when the drive is selected manually via F11. This was confirmed on this lab (R650 BIOS 1.4.4). It is a BIOS certificate-store issue — not a VPN, HTTP-server, or media problem (the ISO mounts and boots over the Sangfor VPN once Secure Boot is off).
+
+```powershell
+# Temporarily disable Secure Boot on a node, then install
+.\bootstrap-cluster.ps1 -Stage 01-deploy-os -OnlyNode 10.8.230.86 -DisableSecureBoot -NoCertWarn
+.\bootstrap-cluster.ps1 -Stage 01-deploy-os -HttpHost 2.2.2.4 -AutounattendIso ..\..\isos\autounattend.iso -StartInstallation -NoCertWarn
+
+# After the OS is installed and BIOS updated (1.4.4 -> 1.21.1), re-enable Secure Boot
+.\bootstrap-cluster.ps1 -Stage 01-deploy-os -OnlyNode 10.8.230.86 -EnableSecureBoot -NoCertWarn
+```
+
+> [!CAUTION]
+> Do not run a second (mount-only) bootstrap while an install is in progress — it detaches RFS1/RFS2 on all targeted nodes, which pulls the media out from under Windows Setup (Setup then asks for a "media driver"). Keep one bootstrap window open until the node reaches first reboot. Re-enable Secure Boot before Stage 5 — Azure Local requires it.
 
 ## Stage 2 — Host networking (`02-configure-network.ps1`)
 

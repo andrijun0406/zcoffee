@@ -26,8 +26,20 @@ param(
     [switch]$FirmwareCheckOnly,   # non-destructive: report installed vs catalog firmware
     [switch]$UpdateFirmware,      # apply firmware from catalog (reboots nodes)
     [string]$CatalogUrl,          # HTTPS catalog host (default from config; e.g. downloads.dell.com or a DRM repo)
+    [switch]$UpdateBios,          # apply a SINGLE BIOS DUP only (targeted; refreshes Secure Boot cert store)
+    [string]$BiosDupFile,         # BIOS DUP file name for -UpdateBios
+    [string]$BiosRepoUrl,         # HTTP/HTTPS repo path hosting the BIOS DUP
+    [string]$BiosRepoProtocol = 'HTTPS',
+    [switch]$UpdateIdrac,         # apply a SINGLE iDRAC DUP only (targeted; iDRAC self-reboots)
+    [string]$IdracDupFile,        # iDRAC DUP file name for -UpdateIdrac
+    [string]$IdracRepoUrl,        # HTTP/HTTPS repo path hosting the iDRAC DUP
+    [string]$IdracRepoProtocol = 'HTTPS',
     [switch]$RecreateBossVd,      # DESTRUCTIVE: delete + recreate the BOSS RAID-1 boot VD
-    [switch]$ForceHardwarePrep    # skip the interactive destructive confirmation for BOSS
+    [switch]$ForceHardwarePrep,   # skip the interactive destructive confirmation for BOSS
+    [switch]$DisableSecureBoot,   # TEMP install workaround: set Secure Boot Disabled (BIOS job + reboot)
+    [switch]$EnableSecureBoot,    # hardening: set Secure Boot Enabled (required for the cluster)
+    # Target a single node by iDRAC IP, node name, or host IP (default: all nodes from config).
+    [string]$OnlyNode
 )
 
 Set-StrictMode -Version Latest
@@ -42,13 +54,26 @@ $HttpPort  = Resolve-Setting -Name 'HttpPort'  -Bound $b -Current $HttpPort  -Co
 if (-not $HttpPort) { $HttpPort = 8080 }
 $CatalogUrl = Resolve-Setting -Name 'CatalogUrl' -Bound $b -Current $CatalogUrl -ConfigKey 'FirmwareCatalogUrl' -Config $cfg
 if (-not $CatalogUrl) { $CatalogUrl = 'downloads.dell.com/Catalog' }
-$doHwPrep = ($FirmwareCheckOnly -or $UpdateFirmware -or $RecreateBossVd)
+$doHwPrep = ($FirmwareCheckOnly -or $UpdateFirmware -or $UpdateBios -or $UpdateIdrac -or $RecreateBossVd -or $DisableSecureBoot -or $EnableSecureBoot)
 # ISO is only needed when installing, or on a plain (non-hardware-prep) run used to test mounting.
 # A hardware-prep-only run (e.g. -FirmwareCheckOnly) without -StartInstallation never touches the ISO.
 $isoNeeded = ($StartInstallation -or (-not $doHwPrep))
 if (-not $b.ContainsKey('iDRACIPs')) {
     if ($cfg.ContainsKey('Nodes')) { $iDRACIPs = @($cfg.Nodes | ForEach-Object { $_.iDRAC }) }
     else { $iDRACIPs = @('10.8.230.84','10.8.230.86') }
+}
+
+if ($OnlyNode) {
+    $match = $null
+    if ($cfg.ContainsKey('Nodes')) {
+        $match = $cfg.Nodes | Where-Object {
+            $_.iDRAC -eq $OnlyNode -or $_.Name -eq $OnlyNode -or
+            ($_.ContainsKey('HostIP') -and $_.HostIP -eq $OnlyNode)
+        } | Select-Object -First 1
+    }
+    if ($match) { $iDRACIPs = @($match.iDRAC) }
+    elseif ($iDRACIPs -contains $OnlyNode) { $iDRACIPs = @($OnlyNode) }
+    else { throw "-OnlyNode '$OnlyNode' did not match any node (by iDRAC IP, name, or host IP) in config." }
 }
 
 function Get-ManagementHostAddress {
@@ -127,8 +152,8 @@ try {
         Invoke-Step 'Prepare node hardware (firmware / BOSS boot VD)' {
             $hw = Join-Path $PSScriptRoot 'prepare-hardware.ps1'
             if (-not (Test-Path $hw -PathType Leaf)) { throw "Missing hardware-prep worker: $hw" }
-            if ($script:RecreateBossVd -and -not $script:ForceHardwarePrep) {
-                Write-Warn 'BOSS recreation is DESTRUCTIVE. Each node will prompt for a typed confirmation.'
+            if ($script:RecreateBossVd) {
+                Write-Warn 'BOSS recreation is DESTRUCTIVE: existing boot VD is deleted and rebuilt on each node. No prompt (the -RecreateBossVd flag is the confirmation).'
             }
             $nodeMeta = @{}
             if ($cfg.ContainsKey('Nodes')) {
@@ -143,7 +168,10 @@ try {
                     -RACADMPath $script:RACADMPath -NoCertWarn:$script:NoCertWarn `
                     -FirmwareCheckOnly:$script:FirmwareCheckOnly -UpdateFirmware:$script:UpdateFirmware `
                     -CatalogUrl $script:CatalogUrl `
+                    -UpdateBios:$script:UpdateBios -BiosDupFile $script:BiosDupFile -BiosRepoUrl $script:BiosRepoUrl -BiosRepoProtocol $script:BiosRepoProtocol `
+                    -UpdateIdrac:$script:UpdateIdrac -IdracDupFile $script:IdracDupFile -IdracRepoUrl $script:IdracRepoUrl -IdracRepoProtocol $script:IdracRepoProtocol `
                     -RecreateBossVd:$script:RecreateBossVd -Force:$script:ForceHardwarePrep `
+                    -DisableSecureBoot:$script:DisableSecureBoot -EnableSecureBoot:$script:EnableSecureBoot `
                     -NodeName $nodeName -ServiceTag $svcTag
                 Write-Ok "Hardware prep complete: $node"
             }

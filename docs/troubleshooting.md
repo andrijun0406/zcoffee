@@ -9,8 +9,32 @@ Each stage writes a timestamped log to `logs/<stage>-<yyyyMMdd-HHmmss>.log` and 
 | RACADM "not found" | RACADM not on PATH | Install Dell iDRAC Tools or pass `-RACADMPath` |
 | iDRAC connect fails | Wrong iDRAC IP/creds or HTTPS blocked | Verify iDRAC `10.8.230.84` / `10.8.230.86`, port 443, credentials |
 | remoteimage fails | iDRAC can't reach the ISO URL | Confirm both iDRACs reach `http://<HttpHost>:8080/...` |
-| Node won't boot installer | Boot device/BOSS not ready | Use `-StartInstallation`; prepare/clean the BOSS virtual disk in iDRAC |
+| Node won't boot installer | Boot device/BOSS not ready | Use `-StartInstallation`; recreate the BOSS VD with `-RecreateBossVd` |
+| **"Boot Failed: Virtual Optical Drive"** even from manual F11 | **Secure Boot enabled on old BIOS** — the cert store rejects the newly-signed Golden Image bootloader | Disable Secure Boot (`-DisableSecureBoot`), install, then update BIOS and re-enable (`-EnableSecureBoot`). See below. |
+| Node boots to PXE instead of the ISO | One-time boot override unreliable on old BIOS | Update BIOS; or press F11 → One-shot UEFI Boot Menu → Virtual Optical Drive |
+| BOSS "fewer than 2 physical disks" | (fixed) parser now reads `Disk.Direct` AHCI disks | Ensure you're on the current `prepare-hardware.ps1` |
+| Setup asks for a "media driver" mid-install | ISO was detached while installing | Never run a second (mount-only) bootstrap during an install — it detaches media on all targeted nodes. Re-run `-OnlyNode <n> -StartInstallation` |
 | ISO hash mismatch | Wrong or corrupt ISO | Re-download the Dell Golden Image; verify `-ExpectedISOHash` |
+
+### Secure Boot boot failure (known issue, confirmed on this lab)
+Symptom: the Golden Image will not boot from the Virtual Optical Drive even when selected manually via F11; the node reports `Boot Failed: Virtual Optical Drive` almost immediately.
+
+Root cause: on very old BIOS (e.g. R650 BIOS **1.4.4**), the UEFI Secure Boot certificate store predates the Azure Local 24H2 Golden Image bootloader signature, so Secure Boot rejects it. This is **not** a VPN, HTTP-server, or media problem — the ISO mounts and streams fine over the Sangfor VPN.
+
+Confirm and fix:
+```powershell
+racadm -r <iDRAC> -u root -p <pw> --nocertwarn get BIOS.SysSecurity.SecureBoot   # Enabled?
+racadm -r <iDRAC> -u root -p <pw> --nocertwarn get BIOS.BiosBootSettings.BootMode # keep Uefi
+```
+Automated path (per node, commits a BIOS job + reboot):
+```powershell
+.\bootstrap-cluster.ps1 -Stage 01-deploy-os -OnlyNode <iDRAC-or-name> -DisableSecureBoot -NoCertWarn
+```
+Then run the install. After the OS is on and BIOS is updated (1.4.4 → 1.21.1), re-enable Secure Boot (required for the validated cluster):
+```powershell
+.\bootstrap-cluster.ps1 -Stage 01-deploy-os -OnlyNode <iDRAC-or-name> -EnableSecureBoot -NoCertWarn
+```
+Keep `BootMode = Uefi` throughout — never switch to BIOS/Legacy. Only one bootstrap window at a time.
 
 ## Stage 2 — Host networking
 | Symptom | Likely cause | Fix |

@@ -45,8 +45,21 @@ param(
     [switch]$FirmwareCheckOnly,
     [switch]$UpdateFirmware,
     [string]$CatalogUrl,
+    [switch]$UpdateBios,
+    [string]$BiosDupFile,
+    [string]$BiosRepoUrl,
+    [string]$BiosRepoProtocol = 'HTTPS',
+    [switch]$UpdateIdrac,
+    [string]$IdracDupFile,
+    [string]$IdracRepoUrl,
+    [string]$IdracRepoProtocol = 'HTTPS',
     [switch]$RecreateBossVd,
-    [switch]$ForceHardwarePrep
+    [switch]$ForceHardwarePrep,
+    [switch]$DisableSecureBoot,
+    [switch]$EnableSecureBoot,
+
+    # Target a single node by iDRAC IP, node name, or host IP (Stage 01 only)
+    [string]$OnlyNode
 )
 
 Set-StrictMode -Version Latest
