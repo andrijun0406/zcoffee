@@ -59,7 +59,11 @@ param(
     [switch]$EnableSecureBoot,
 
     # Target a single node by iDRAC IP, node name, or host IP (Stage 01 only)
-    [string]$OnlyNode
+    [string]$OnlyNode,
+
+    # Multi-node boot pacing (Stage 01 only). Sequential is the default for >1 node.
+    [switch]$ParallelNodes,
+    [int]$NodeBootGapSeconds = 0
 )
 
 Set-StrictMode -Version Latest

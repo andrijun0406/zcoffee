@@ -23,7 +23,7 @@ param(
     [Parameter(Mandatory)][string]$Prefix,        # e.g. http://+:8080/
     [Parameter(Mandatory)][string]$Directory,
     [int]$MaxThreads = 24,
-    [int]$BufferBytes = 1048576                    # 1 MB stream chunk
+    [int]$BufferBytes = 262144                     # 256 KB stream chunk (VPN-friendly)
 )
 
 Set-StrictMode -Version Latest
@@ -37,8 +37,18 @@ $root = [System.IO.Path]::GetFullPath($Directory)
 
 $listener = [System.Net.HttpListener]::new()
 $listener.Prefixes.Add($Prefix)
-# Allow many queued/parallel connections.
-try { $listener.TimeoutManager.IdleConnection = [TimeSpan]::FromMinutes(5) } catch { }
+
+# --- VPN tolerance: relax HTTP.sys timeouts so slow, high-latency reads over
+# a client VPN (e.g. Sangfor) are not dropped mid-stream. Each is best-effort;
+# some properties are platform-dependent, so failures are ignored. ---
+$tm = $listener.TimeoutManager
+try { $tm.IdleConnection    = [TimeSpan]::FromMinutes(10) } catch { }
+try { $tm.HeaderWait        = [TimeSpan]::FromMinutes(2)  } catch { }
+try { $tm.EntityBody        = [TimeSpan]::FromMinutes(10) } catch { }
+try { $tm.DrainEntityBody   = [TimeSpan]::FromMinutes(10) } catch { }
+# HTTP.sys drops a response if throughput falls below this floor. Lower it so a
+# constrained VPN uplink can keep a boot-image read alive.
+try { $tm.MinSendBytesPerSecond = 64 } catch { }
 
 try {
     $listener.Start()

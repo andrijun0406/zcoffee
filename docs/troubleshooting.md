@@ -52,6 +52,17 @@ Fallbacks if the scripted boot still fails on a given node:
 1. iDRAC HTML5 **Virtual Console → Virtual Media → Map CD/DVD** to the local ISO, then set next boot to Virtual CD/DVD. (Proven to work over the VPN.)
 2. Run Stage 1 from a **jump host inside `10.8.230.0/24`** (`-HttpHost 10.8.230.225`) to remove VPN latency from the boot stream entirely.
 
+### VPN throughput tuning (sequential boot + relaxed timeouts)
+When booting two nodes over a client VPN, the two iDRACs pulling the boot image **at the same time** can saturate the uplink and cause both boots to fail. Two mitigations are built in:
+
+- **Sequential boot (default for >1 node).** Stage 1 now boots one node, then paces the next so their boot-image reads do not overlap. Control it with:
+  - `-NodeBootGapSeconds 0` (default): prompt to press Enter after each node reaches Windows Setup, then boot the next.
+  - `-NodeBootGapSeconds 300`: wait a fixed 5 minutes between nodes (hands-off).
+  - `-ParallelNodes`: opt back into booting all nodes at once (old behavior).
+- **Relaxed HTTP.sys timeouts in `serve-iso.ps1`.** IdleConnection/EntityBody/DrainEntityBody are raised to 10 minutes, HeaderWait to 2 minutes, and `MinSendBytesPerSecond` lowered to 64 so a slow VPN uplink is not dropped mid-stream. The stream chunk is 256 KB (gentler on lossy links). These are best-effort and platform-dependent.
+
+If a single node still cannot boot the ISO over the VPN even sequentially, the bottleneck is the iDRAC's own reverse path to your PC over Sangfor (the native HTML5 map avoids this by streaming through the console channel). In that case the **jump host inside the DC is the durable fix** — it gives the iDRAC a LAN-speed, low-latency read.
+
 Note: the earlier Secure Boot section's "not an HTTP-server problem" statement applies to *that* symptom (immediate Boot Failed with Secure Boot Enabled). This is a distinct, separately-fixed HTTP-server issue.
 
 ## Stage 2 — Host networking

@@ -39,7 +39,13 @@ param(
     [switch]$DisableSecureBoot,   # TEMP install workaround: set Secure Boot Disabled (BIOS job + reboot)
     [switch]$EnableSecureBoot,    # hardening: set Secure Boot Enabled (required for the cluster)
     # Target a single node by iDRAC IP, node name, or host IP (default: all nodes from config).
-    [string]$OnlyNode
+    [string]$OnlyNode,
+    # --- Multi-node boot pacing (VPN-friendly) ---
+    # By default, when installing more than one node the boot is SEQUENTIAL: each node is
+    # booted and given time to finish streaming its boot image before the next node starts,
+    # so two iDRACs don't saturate the VPN reading the ISO at the same time.
+    [switch]$ParallelNodes,          # opt back into old behavior: boot all nodes at once
+    [int]$NodeBootGapSeconds = 0     # 0 = prompt between nodes; >0 = wait this many seconds
 )
 
 Set-StrictMode -Version Latest
@@ -252,7 +258,14 @@ try {
     Invoke-Step 'Mount ISO on each node via RACADM worker' {
         $worker = Join-Path $PSScriptRoot 'deploy-os.ps1'
         if (-not (Test-Path $worker -PathType Leaf)) { throw "Missing worker: $worker" }
-        foreach ($node in $script:iDRACIPs) {
+        $nodeList = @($script:iDRACIPs)
+        # Sequential by default when installing >1 node (VPN-friendly). -ParallelNodes opts out.
+        $sequential = ($script:StartInstallation -and -not $script:ParallelNodes -and $nodeList.Count -gt 1)
+        if ($sequential) {
+            Write-Info "Sequential boot: one node streams the ISO at a time to avoid saturating the VPN."
+        }
+        for ($ni = 0; $ni -lt $nodeList.Count; $ni++) {
+            $node = $nodeList[$ni]
             Write-Info "Node iDRAC: $node"
             if ($script:autoUrlEffective) {
                 & $worker -NodeIP $node -iDRACUser $script:iDRACUser -iDRACPassword $script:iDRACPassword `
@@ -266,6 +279,25 @@ try {
                     -StartInstallation:$script:StartInstallation -NoCertWarn:$script:NoCertWarn
             }
             Write-Ok "Node processed: $node"
+
+            # Pace the next node so its boot-image read doesn't overlap this one over the VPN.
+            if ($sequential -and ($ni -lt $nodeList.Count - 1)) {
+                $next = $nodeList[$ni + 1]
+                if ($script:NodeBootGapSeconds -gt 0) {
+                    Write-Info "Waiting $($script:NodeBootGapSeconds)s for $node to finish its boot-image read before starting $next ..."
+                    $left = [int]$script:NodeBootGapSeconds
+                    while ($left -gt 0) {
+                        if ($serverProcess.HasExited) { throw 'ISO server exited during sequential wait.' }
+                        $chunk = [Math]::Min(30, $left)
+                        Start-Sleep -Seconds $chunk
+                        $left -= $chunk
+                    }
+                }
+                else {
+                    Write-Warn "Let $node reach Windows Setup (past the boot-image copy), then press Enter to boot $next."
+                    [void](Read-Host 'Press Enter to continue to the next node')
+                }
+            }
         }
     }
 
