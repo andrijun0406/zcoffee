@@ -115,6 +115,59 @@ function Remove-RemoteImage {
     & $RacadmExe @racArgs $Slot -d 2>&1 | Out-Null
 }
 
+# Returns raw text of "<slot> -s" (e.g. "Remote File Share is Enabled/Disabled").
+function Get-RemoteImageState {
+    param([Parameter(Mandatory)][string]$Slot)
+
+    $racArgs = @('-r', $NodeIP, '-u', $iDRACUser, '-p', $iDRACPasswordPlain)
+    if ($NoCertWarn) { $racArgs += '--nocertwarn' }
+    return (& $RacadmExe @racArgs $Slot -s 2>&1 | Out-String)
+}
+
+# Poll until a slot reports Disabled (detach is asynchronous on iDRAC).
+function Wait-RemoteImageDisabled {
+    param(
+        [Parameter(Mandatory)][string]$Slot,
+        [int]$TimeoutSec = 60
+    )
+
+    $deadline = (Get-Date).AddSeconds($TimeoutSec)
+    while ((Get-Date) -lt $deadline) {
+        $state = Get-RemoteImageState -Slot $Slot
+        if ($state -match 'Disabled') { return $true }
+        Start-Sleep -Seconds 3
+    }
+    Write-Host "WARNING: $Slot on $NodeIP did not report Disabled within ${TimeoutSec}s." -ForegroundColor Yellow
+    return $false
+}
+
+# Connect a remote image with retries (the connect can briefly race a pending
+# detach and return "Unable to perform requested operation").
+function Connect-RemoteImage {
+    param(
+        [Parameter(Mandatory)][string]$Slot,
+        [Parameter(Mandatory)][string]$Url,
+        [int]$Retries = 4
+    )
+
+    for ($attempt = 1; $attempt -le $Retries; $attempt++) {
+        $racArgs = @('-r', $NodeIP, '-u', $iDRACUser, '-p', $iDRACPasswordPlain)
+        if ($NoCertWarn) { $racArgs += '--nocertwarn' }
+        $out = & $RacadmExe @racArgs $Slot -c -l $Url 2>&1
+        if ($LASTEXITCODE -eq 0) { return }
+
+        $safe = ($out | ForEach-Object { $_.ToString().Replace($iDRACPasswordPlain, '<redacted>') }) -join [Environment]::NewLine
+        if ($attempt -lt $Retries) {
+            Write-Host "  $Slot connect attempt $attempt failed; re-checking share state and retrying..." -ForegroundColor Yellow
+            [void](Wait-RemoteImageDisabled -Slot $Slot -TimeoutSec 30)
+            Start-Sleep -Seconds 3
+        }
+        else {
+            throw "RACADM $Slot connect failed for $NodeIP after $Retries attempts. Output: $safe"
+        }
+    }
+}
+
 function Test-RACADMConnection {
     Write-Host "Testing iDRAC connectivity: $NodeIP"
 
@@ -163,27 +216,23 @@ try {
         return
     }
 
-    # Make the mount idempotent: clear any stale share left by a prior run
-    # so 'remoteimage -c' does not fail with an already-enabled error.
+    # Make the mount idempotent: clear any stale share left by a prior run,
+    # then WAIT until each slot actually reports Disabled. 'remoteimage -d' is
+    # asynchronous ("Disable Remote File Started ... check status using -s"),
+    # so mounting too soon fails with "Unable to perform requested operation".
     Write-Host "Clearing any stale remote media on $NodeIP before mount"
-    Remove-RemoteImage -Slot 'remoteimage'
     Remove-RemoteImage -Slot 'remoteimage2'
-    Start-Sleep -Seconds 2
+    Remove-RemoteImage -Slot 'remoteimage'
+    [void](Wait-RemoteImageDisabled -Slot 'remoteimage'  -TimeoutSec 60)
+    [void](Wait-RemoteImageDisabled -Slot 'remoteimage2' -TimeoutSec 60)
 
     Write-Host "Mounting ISO on $NodeIP"
-
-    $null = Invoke-RACADM -CommandArguments @(
-        'remoteimage',
-        '-c',
-        '-l',
-        $ISOUrl
-    )
-
+    Connect-RemoteImage -Slot 'remoteimage' -Url $ISOUrl
     Write-Host "Remote ISO mounted successfully on $NodeIP"
 
     if ($AutounattendUrl) {
         Write-Host "Attaching Autounattend image via RFS2 on $NodeIP"
-        $null = Invoke-RACADM -CommandArguments @('remoteimage2', '-c', '-l', $AutounattendUrl)
+        Connect-RemoteImage -Slot 'remoteimage2' -Url $AutounattendUrl
         Write-Host "Autounattend image attached via RFS2 on $NodeIP"
     }
 
