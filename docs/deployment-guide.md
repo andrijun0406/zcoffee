@@ -45,6 +45,14 @@ This guide maps the six-stage automation to the Dell AX System for Azure Local (
 - Windows PowerShell 5.1+ or PowerShell 7+, run as Administrator.
 - Dell RACADM on PATH or via `-RACADMPath`.
 - No Python needed. The Golden Image ISO is served by a native PowerShell HTTP server (`serve-iso.ps1`, uses .NET HttpListener) that Stage 1 launches automatically.
+- Inbound firewall rule for the ISO server port. The iDRAC pulls the ISO from this PC over TCP 8080, so an inbound Allow rule is REQUIRED. Stage 1 preflight now checks for it and fails fast with the fix command if missing. Create it once per PC:
+
+    ```powershell
+    New-NetFirewallRule -DisplayName 'AzureLocal ISO 8080' -Direction Inbound -Action Allow -Protocol TCP -LocalPort 8080
+    ```
+
+    > [!IMPORTANT]
+    > Without this rule, the `remoteimage` connect half-opens and the NEXT attempt fails with `RAC0718: Remote File Share service is busy`. See troubleshooting.
 - Azure CLI for Stage 5.
 - Keep the Golden Image ISO under `isos/` (gitignored). Never commit ISOs.
 

@@ -9,6 +9,8 @@ Each stage writes a timestamped log to `logs/<stage>-<yyyyMMdd-HHmmss>.log` and 
 | RACADM "not found" | RACADM not on PATH | Install Dell iDRAC Tools or pass `-RACADMPath` |
 | iDRAC connect fails | Wrong iDRAC IP/creds or HTTPS blocked | Verify iDRAC `10.8.230.84` / `10.8.230.86`, port 443, credentials |
 | remoteimage fails | iDRAC can't reach the ISO URL | Confirm both iDRACs reach `http://<HttpHost>:8080/...` |
+| **`RAC0718: Remote File Share service is busy`** | A prior `remoteimage` connect half-opened (usually **inbound TCP 8080 blocked** on this PC) and wedged the RFS service | Add the inbound 8080 rule (below); then `remoteimage -d` both slots, and if still stuck `racadm ... racreset soft`. See below. |
+| **`ERROR: Unable to perform requested operation`** on mount | Stale RFS session still detaching, or 8080 blocked so the connect can't complete | Ensure inbound TCP 8080 is allowed; worker now waits for `Disabled` and retries |
 | Node won't boot installer | Boot device/BOSS not ready | Use `-StartInstallation`; recreate the BOSS VD with `-RecreateBossVd` |
 | **"Boot Failed: Virtual Optical Drive"** even from manual F11 | **Secure Boot enabled on old BIOS** — the cert store rejects the newly-signed Golden Image bootloader | Disable Secure Boot (`-DisableSecureBoot`), install, then update BIOS and re-enable (`-EnableSecureBoot`). See below. |
 | Node boots to PXE instead of the ISO | One-time boot override unreliable on old BIOS | Update BIOS; or press F11 → One-shot UEFI Boot Menu → Virtual Optical Drive |
@@ -16,6 +18,33 @@ Each stage writes a timestamped log to `logs/<stage>-<yyyyMMdd-HHmmss>.log` and 
 | Setup asks for a "media driver" mid-install | ISO was detached while installing | Never run a second (mount-only) bootstrap during an install — it detaches media on all targeted nodes. Re-run `-OnlyNode <n> -StartInstallation` |
 | ISO hash mismatch | Wrong or corrupt ISO | Re-download the Dell Golden Image; verify `-ExpectedISOHash` |
 | **"No compatible bootloader available"** (or boots via iDRAC HTML5 native Map CD/DVD but NOT via the script) | **Single-threaded `serve-iso.ps1`** could not satisfy the iDRAC boot-time streaming pattern (many concurrent HTTP Range reads) | Use the current multi-threaded, Range-aware `serve-iso.ps1`. See below. |
+
+### Inbound firewall for the ISO server (TCP 8080) — REQUIRED per PC
+
+The iDRAC pulls the Golden Image from this PC over **TCP 8080**. On a fresh PC the Windows Firewall blocks inbound 8080 by default, which produces confusing, cascading failures:
+
+1. First mount attempt → `ERROR: Unable to perform requested operation` (the iDRAC accepts the connect but can't reach `http://<HttpHost>:8080`, leaving a half-open Remote File Share session).
+2. Next attempt → `RAC0718: Remote File Share service is busy with the previous connection` — the wedged session blocks new connects, and `remoteimage -s` may still show *Disabled* even though the service is stuck.
+
+Fix (run once per PC, elevated):
+
+```powershell
+New-NetFirewallRule -DisplayName 'AzureLocal ISO 8080' -Direction Inbound -Action Allow -Protocol TCP -LocalPort 8080
+```
+
+Stage 1 preflight now checks for this rule and fails fast with the exact command if it's missing (bypass with `-SkipFirewallCheck`).
+
+Recovering a wedged RFS service (RAC0718):
+
+```powershell
+racadm -r <idrac> -u root -p <pw> --nocertwarn remoteimage  -d
+racadm -r <idrac> -u root -p <pw> --nocertwarn remoteimage2 -d
+racadm -r <idrac> -u root -p <pw> --nocertwarn remoteimage  -s   # confirm Disabled
+# if still busy, reset the iDRAC (does NOT reboot the host); wait ~2 min:
+racadm -r <idrac> -u root -p <pw> --nocertwarn racreset soft
+```
+
+Note: RFS1 and RFS2 share one Remote File Share service, so a wedge on either slot blocks the other; `racreset soft` clears both. This is iDRAC-side state, so switching PCs does not clear it — an old PC's orphaned session can block a new PC.
 
 ### Secure Boot boot failure (known issue, confirmed on this lab)
 Symptom: the Golden Image will not boot from the Virtual Optical Drive even when selected manually via F11; the node reports `Boot Failed: Virtual Optical Drive` almost immediately.
