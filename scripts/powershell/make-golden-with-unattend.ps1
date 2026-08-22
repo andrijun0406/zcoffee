@@ -229,12 +229,20 @@ try {
 
     # --- Copy the full ISO tree to staging (robocopy handles long paths + retries) ---
     Write-Step "Copying golden ISO contents to staging (several minutes for ~8 GB)..."
-    $rc = Start-Process -FilePath robocopy.exe `
-        -ArgumentList @("`"$drive\`"", "`"$StagingDir`"", '/E', '/COPY:DAT', '/R:2', '/W:2', '/NP', '/NFL', '/NDL', '/NJH', '/NJS') `
-        -Wait -PassThru -WindowStyle Hidden
+    # NOTE: a quoted drive root like "I:\" is mangled to I:" by the C runtime ( \" = escaped quote ),
+    # which robocopy rejects with exit 16 (nothing copied). Invoke robocopy directly so PowerShell
+    # handles argument passing, and pass the drive root without a trailing-backslash-before-quote.
+    $srcRoot = $drive + '\'   # e.g. I:\
+    & robocopy.exe $srcRoot $StagingDir /E /COPY:DAT /R:2 /W:2 /NP /NFL /NDL /NJH /NJS | Out-Null
+    $rcCode = $LASTEXITCODE
     # robocopy exit codes < 8 are success (0-7). >=8 is a real failure.
-    if ($rc.ExitCode -ge 8) { throw "robocopy failed copying ISO contents (exit $($rc.ExitCode))." }
-    Write-Step "Copy complete (robocopy exit $($rc.ExitCode))." 'Green'
+    if ($rcCode -ge 8) { throw "robocopy failed copying ISO contents (exit $rcCode)." }
+    Write-Step "Copy complete (robocopy exit $rcCode)." 'Green'
+
+    # Verify content actually landed (guards against a silent partial copy).
+    $stagedCount = @(Get-ChildItem -LiteralPath $StagingDir -Force -ErrorAction SilentlyContinue).Count
+    if ($stagedCount -eq 0) { throw "Staging folder is empty after robocopy; nothing copied from $srcRoot." }
+    if (-not (Test-Path (Join-Path $StagingDir 'efi'))) { throw "Copied tree is missing the 'efi' folder; source copy incomplete." }
 
     # --- Drop Autounattend.xml at the staging root ---
     $xmlPath = Join-Path $StagingDir 'Autounattend.xml'
