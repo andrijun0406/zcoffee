@@ -22,9 +22,10 @@ zcoffee/
 │   │   ├── bootstrap-cluster.ps1      # stage dispatcher (+ -UseGui)
 │   │   ├── ui-common.ps1              # shared dashboard / logging / GUI + config loader
 │   │   ├── preflight-os.ps1           # non-destructive OS prerequisite checks
-│   │   ├── deploy-os.ps1              # RACADM worker (mount ISO/RFS2, optional boot)
+│   │   ├── deploy-os.ps1              # RACADM worker (single-RFS mount, optional boot)
 │   │   ├── prepare-hardware.ps1       # firmware check/update + BOSS boot VD recreate
-│   │   ├── make-autounattend-iso.ps1  # builds Autounattend ISO into ../../isos/
+│   │   ├── make-golden-with-unattend.ps1 # slipstreams Autounattend.xml INTO the golden ISO (single RFS)
+│   │   ├── make-autounattend-iso.ps1  # DEPRECATED (separate RFS2 ISO; breaks boot on this firmware)
 │   │   ├── serve-iso.ps1              # native PowerShell ISO HTTP server (no Python)
 │   │   ├── 01-deploy-os.ps1
 │   │   ├── 02-configure-network.ps1
@@ -34,7 +35,7 @@ zcoffee/
 │   │   └── 06-validate-cluster.ps1
 │   └── arm-templates/
 │       └── azure-local.parameters.example.json
-└── isos/                              # golden image + generated autounattend.iso (gitignored)
+└── isos/                              # golden image + generated unattended ISO (gitignored)
 ```
 
 ## Prerequisites

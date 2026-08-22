@@ -55,6 +55,7 @@ This guide maps the six-stage automation to the Dell AX System for Azure Local (
     > Without this rule, the `remoteimage` connect half-opens and the NEXT attempt fails with `RAC0718: Remote File Share service is busy`. See troubleshooting.
 - Azure CLI for Stage 5.
 - Keep the Golden Image ISO under `isos/` (gitignored). Never commit ISOs.
+- For hands-off installs, bake the answer file INTO the golden ISO with `make-golden-with-unattend.ps1` (single RFS mount). Do NOT mount a separate Autounattend ISO as a second RFS device — see the single-RFS note below.
 
 ## Stage 1 — OS deployment (`01-deploy-os.ps1`)
 
@@ -102,19 +103,43 @@ Stage 1 can bring each node to a known-good state first, via `prepare-hardware.p
 
 ### Secure Boot and the Golden Image boot failure
 
-On very old BIOS, UEFI Secure Boot can reject the newly-signed Golden Image bootloader, so the node reports `Boot Failed: Virtual Optical Drive` even when the drive is selected manually via F11. This was confirmed on this lab (R650 BIOS 1.4.4). It is a BIOS certificate-store issue — not a VPN, HTTP-server, or media problem (the ISO mounts and boots over the Sangfor VPN once Secure Boot is off).
+On very old BIOS, UEFI Secure Boot can reject the newly-signed Golden Image bootloader, so the node reports `Boot Failed: Virtual Optical Drive` even when the drive is selected manually via F11. Disable Secure Boot as a temporary workaround, install, then re-enable it after a BIOS update (Azure Local requires Secure Boot for the validated cluster). Note: on this lab a BIOS update from 1.4.4 to 1.12.1 did NOT by itself resolve the boot failure — the actual root cause was a second RFS image blocking boot (see the single-RFS note below).
 
 ```powershell
-# Temporarily disable Secure Boot on a node, then install
+# Temporarily disable Secure Boot on a node
 .\bootstrap-cluster.ps1 -Stage 01-deploy-os -OnlyNode 10.8.230.86 -DisableSecureBoot -NoCertWarn
-.\bootstrap-cluster.ps1 -Stage 01-deploy-os -HttpHost 2.2.2.4 -AutounattendIso ..\..\isos\autounattend.iso -StartInstallation -NoCertWarn
 
-# After the OS is installed and BIOS updated (1.4.4 -> 1.21.1), re-enable Secure Boot
+# Install (single RFS mount; unattended golden ISO)
+.\bootstrap-cluster.ps1 -Stage 01-deploy-os -HttpHost 2.2.2.4 -ISOFile ..\..\isos\AzureLocal-unattend.iso -StartInstallation -NoCertWarn
+
+# After the OS is installed and BIOS updated, re-enable Secure Boot
 .\bootstrap-cluster.ps1 -Stage 01-deploy-os -OnlyNode 10.8.230.86 -EnableSecureBoot -NoCertWarn
 ```
 
 > [!CAUTION]
-> Do not run a second (mount-only) bootstrap while an install is in progress — it detaches RFS1/RFS2 on all targeted nodes, which pulls the media out from under Windows Setup (Setup then asks for a "media driver"). Keep one bootstrap window open until the node reaches first reboot. Re-enable Secure Boot before Stage 5 — Azure Local requires it.
+> Do not run a second (mount-only) bootstrap while an install is in progress — it detaches remote media on all targeted nodes, which pulls the media out from under Windows Setup (Setup then asks for a "media driver"). Keep one bootstrap window open until the node reaches first reboot. Re-enable Secure Boot before Stage 5 — Azure Local requires it.
+
+### Single-RFS mount and the unattended golden ISO
+
+On R650 BIOS 1.12.1, mounting a SECOND iDRAC RFS image (`racadm remoteimage2`, e.g. a separate Autounattend ISO) prevents the golden ISO on RFS1 from enumerating as a bootable UEFI device. In the F11 boot menu only "Virtual Network File 2" appears; "Virtual Network File 1" (the golden ISO) is absent, and the node cannot boot the installer. This was the true root cause of the repeated boot failures — not the Sangfor VPN, not Secure Boot, and not the HTTP server (the jump-host test on the DC LAN failed the same way until RFS2 was removed).
+
+The fix is a single RFS mount with the answer file slipstreamed into the golden ISO:
+
+```powershell
+# 1. Build an unattended golden ISO (bakes Autounattend.xml into the ISO root; single bootable image)
+.\make-golden-with-unattend.ps1 `
+  -GoldenIso ..\..\isos\AzureLocal24H2.<...>_A01.en-us.iso `
+  -OutputIso ..\..\isos\AzureLocal-unattend.iso
+
+# 2. Deploy with ONE RFS mount (no RFS2). Fully unattended except the disk-selection screen.
+.\bootstrap-cluster.ps1 -Stage 01-deploy-os -HttpHost <server-ip> `
+  -ISOFile ..\..\isos\AzureLocal-unattend.iso -StartInstallation -NoCertWarn
+```
+
+`make-golden-with-unattend.ps1` uses native IMAPI2 (no ADK/Python): it enables UDF (the install image inside can exceed the 4 GB ISO9660 limit) and re-assigns the UEFI El Torito boot image (`efisys_noprompt.bin`, which also removes the "Press any key to boot" prompt). Disk selection stays interactive to protect the S2D data disks; select the BOSS RAID-1 `OS` volume. Validate the first output by booting one node before relying on it for both.
+
+> [!NOTE]
+> The `01-deploy-os.ps1` worker no longer mounts a second RFS image at all; it actively clears any stale RFS2 before mounting RFS1. The older `make-autounattend-iso.ps1` (separate RFS2 ISO) is deprecated — use `make-golden-with-unattend.ps1` instead.
 
 ## Stage 2 — Host networking (`02-configure-network.ps1`)
 

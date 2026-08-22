@@ -18,10 +18,6 @@ param(
     # Supply when the ISO is already hosted at a DC-reachable URL (e.g. jump host / file server).
     # Bypasses the local Python HTTP server and the HttpHost check (needed on client VPNs like Sangfor).
     [string]$ISOUrl,
-    # Optional: path to a small Autounattend ISO (see make-autounattend-iso.ps1). Mounted via iDRAC RFS2.
-    [string]$AutounattendIso,
-    # Optional: DC-reachable URL of the Autounattend ISO (use with -ISOUrl external hosting).
-    [string]$AutounattendUrl,
     # --- Hardware preparation (optional, runs before OS deploy) ---
     [switch]$FirmwareCheckOnly,   # non-destructive: report installed vs catalog firmware
     [switch]$UpdateFirmware,      # apply firmware from catalog (reboots nodes)
@@ -99,7 +95,6 @@ if ($doHwPrep) { $totalSteps++ }
 if ($isoNeeded) { $totalSteps += 3 }   # ISO server prep, start server, mount
 Initialize-Ui -StageName '01-deploy-os' -TotalSteps $totalSteps -UseGui:$UseGui
 $serverProcess = $null
-$script:autoUrlEffective = $null
 
 try {
     Invoke-Step 'Verify Administrator privileges' {
@@ -205,7 +200,6 @@ try {
             Write-Info "Using provided ISO URL: $script:ISOUrl"
             Write-Warn 'Confirm both iDRAC interfaces can reach this URL from inside the datacenter.'
             $script:isoUrlEffective = $script:ISOUrl
-            if ($script:AutounattendUrl) { $script:autoUrlEffective = $script:AutounattendUrl; Write-Info "Autounattend URL: $script:autoUrlEffective" }
             return
         }
         $script:ISOFile = (Resolve-Path $script:ISOFile).Path
@@ -240,19 +234,10 @@ try {
         }
         $encoded = [Uri]::EscapeDataString($isoName)
         $script:isoUrlEffective = "http://$script:HttpHost`:$script:HttpPort/$encoded"
-        $null = Invoke-WebRequest -Uri $script:isoUrlEffective -Method Head -TimeoutSec 15
+        $null = Invoke-WebRequest -Uri $script:isoUrlEffective -Method Head -TimeoutSec 15 -UseBasicParsing
         Write-Ok "ISO URL live: $script:isoUrlEffective"
         Write-Warn 'Confirm both iDRAC interfaces can reach this URL on the chosen port.'
-
-        if ($script:AutounattendIso) {
-            if (-not (Test-Path $script:AutounattendIso -PathType Leaf)) { throw "Autounattend ISO not found: $script:AutounattendIso" }
-            $autoName = Split-Path $script:AutounattendIso -Leaf
-            $autoInDir = Join-Path $isoDir $autoName
-            if (-not (Test-Path $autoInDir)) { Copy-Item -LiteralPath $script:AutounattendIso -Destination $autoInDir -Force }
-            $script:autoUrlEffective = "http://$script:HttpHost`:$script:HttpPort/$([Uri]::EscapeDataString($autoName))"
-            $null = Invoke-WebRequest -Uri $script:autoUrlEffective -Method Head -TimeoutSec 15
-            Write-Ok "Autounattend URL live: $script:autoUrlEffective (mounted via RFS2)"
-        }
+        Write-Info 'Single-RFS mount: the answer file is expected to be slipstreamed into the golden ISO (see make-golden-with-unattend.ps1). A second RFS image is NOT mounted, as it breaks golden-ISO boot on this firmware.'
     }
 
     Invoke-Step 'Mount ISO on each node via RACADM worker' {
@@ -267,17 +252,9 @@ try {
         for ($ni = 0; $ni -lt $nodeList.Count; $ni++) {
             $node = $nodeList[$ni]
             Write-Info "Node iDRAC: $node"
-            if ($script:autoUrlEffective) {
-                & $worker -NodeIP $node -iDRACUser $script:iDRACUser -iDRACPassword $script:iDRACPassword `
-                    -ISOUrl $script:isoUrlEffective -RACADMPath $script:RACADMPath `
-                    -StartInstallation:$script:StartInstallation -NoCertWarn:$script:NoCertWarn `
-                    -AutounattendUrl $script:autoUrlEffective
-            }
-            else {
-                & $worker -NodeIP $node -iDRACUser $script:iDRACUser -iDRACPassword $script:iDRACPassword `
-                    -ISOUrl $script:isoUrlEffective -RACADMPath $script:RACADMPath `
-                    -StartInstallation:$script:StartInstallation -NoCertWarn:$script:NoCertWarn
-            }
+            & $worker -NodeIP $node -iDRACUser $script:iDRACUser -iDRACPassword $script:iDRACPassword `
+                -ISOUrl $script:isoUrlEffective -RACADMPath $script:RACADMPath `
+                -StartInstallation:$script:StartInstallation -NoCertWarn:$script:NoCertWarn
             Write-Ok "Node processed: $node"
 
             # Pace the next node so its boot-image read doesn't overlap this one over the VPN.

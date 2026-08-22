@@ -11,16 +11,22 @@ credentials that can write to the jump host.
 param(
     [Parameter(Mandatory)][string]$JumpHost = '10.8.230.225',
     [PSCredential]$Credential,
-    [string]$RepoRoot = '..\..\..',
-    [string]$IsoFolder = '..\..\..\isos',
+    [string]$RepoRoot,
+    [string]$IsoFolder,
     [string]$DestRoot = 'C$\LabInfra'
 )
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
+# Repo root is two levels up from this script (repo\scripts\powershell).
+# Anchor to the script location so it does not depend on the current directory.
+if (-not $RepoRoot)  { $RepoRoot  = Join-Path $PSScriptRoot '..\..' }
+if (-not $IsoFolder) { $IsoFolder = Join-Path $RepoRoot 'isos' }
 $repo = (Resolve-Path $RepoRoot).Path
 $isos = (Resolve-Path $IsoFolder).Path
+Write-Host ("Repo root:  " + $repo)
+Write-Host ("ISO folder: " + $isos)
 if (-not $Credential) { $Credential = Get-Credential -Message "Admin creds for jump host $JumpHost" }
 
 $dest = "\\$JumpHost\$DestRoot"
