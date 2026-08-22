@@ -56,6 +56,7 @@ This guide maps the six-stage automation to the Dell AX System for Azure Local (
 - Azure CLI for Stage 5.
 - Keep the Golden Image ISO under `isos/` (gitignored). Never commit ISOs.
 - For hands-off installs, bake the answer file INTO the golden ISO with `make-golden-with-unattend.ps1` (single RFS mount). Do NOT mount a separate Autounattend ISO as a second RFS device — see the single-RFS note below.
+- `make-golden-with-unattend.ps1` requires **oscdimg.exe** (Windows ADK "Deployment Tools"). It is a single ~2 MB binary; install the ADK feature or copy just `oscdimg.exe` to the build host and pass `-OscdimgPath`. The script auto-detects it on PATH and in the default ADK location.
 
 ## Stage 1 — OS deployment (`01-deploy-os.ps1`)
 
@@ -136,7 +137,7 @@ The fix is a single RFS mount with the answer file slipstreamed into the golden 
   -ISOFile ..\..\isos\AzureLocal-unattend.iso -StartInstallation -NoCertWarn
 ```
 
-`make-golden-with-unattend.ps1` uses native IMAPI2 (no ADK/Python): it enables UDF (the install image inside can exceed the 4 GB ISO9660 limit) and re-assigns the UEFI El Torito boot image (`efisys_noprompt.bin`, which also removes the "Press any key to boot" prompt). Disk selection stays interactive to protect the S2D data disks; select the BOSS RAID-1 `OS` volume. Validate the first output by booting one node before relying on it for both.
+`make-golden-with-unattend.ps1` repacks the ISO with **oscdimg**: it mounts the golden ISO, robocopies the tree to a staging folder, drops `Autounattend.xml` at the root, and rebuilds with UDF (the install image inside can exceed the 4 GB ISO9660 limit) plus the BIOS+UEFI El Torito boot catalog (`efisys_noprompt.bin`, which also removes the "Press any key to boot" prompt). IMAPI2 was tried first but fails on large dual-boot Windows media (error `0xC0AAB132` in `CreateResultImage`) and is not registered on Server Core — oscdimg is the reliable, Microsoft-supported path. Building needs free disk ~2x the ISO size (staging + output). Disk selection stays interactive to protect the S2D data disks; select the BOSS RAID-1 `OS` volume. Validate the first output by booting one node before relying on it for both.
 
 > [!NOTE]
 > The `01-deploy-os.ps1` worker no longer mounts a second RFS image at all; it actively clears any stale RFS2 before mounting RFS1. The older `make-autounattend-iso.ps1` (separate RFS2 ISO) is deprecated — use `make-golden-with-unattend.ps1` instead.

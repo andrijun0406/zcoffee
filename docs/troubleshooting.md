@@ -111,7 +111,7 @@ This finding supersedes the earlier theories in the two sections below. The defi
 Fix — single RFS mount with the answer file slipstreamed into the golden ISO:
 
 ```powershell
-# Build the unattended golden ISO (native IMAPI2; UDF + UEFI El Torito efisys_noprompt.bin)
+# Build the unattended golden ISO (oscdimg; UDF + BIOS/UEFI El Torito efisys_noprompt.bin)
 .\make-golden-with-unattend.ps1 `
   -GoldenIso ..\..\isos\AzureLocal24H2.<...>_A01.en-us.iso `
   -OutputIso ..\..\isos\AzureLocal-unattend.iso
@@ -124,8 +124,11 @@ Fix — single RFS mount with the answer file slipstreamed into the golden ISO:
 The `01-deploy-os.ps1`/`deploy-os.ps1` worker no longer mounts RFS2 at all, and actively clears any stale RFS2 before mounting RFS1. The older `make-autounattend-iso.ps1` (separate RFS2 ISO) is deprecated — use `make-golden-with-unattend.ps1`.
 
 Notes on the slipstream:
-- UDF is enabled because the Windows install image inside the ISO can exceed the 4 GB ISO9660 per-file limit.
-- The UEFI boot image `efi\microsoft\boot\efisys_noprompt.bin` is re-assigned so the rebuilt ISO stays UEFI-bootable and skips the "Press any key to boot from CD/DVD" prompt.
+- The rebuild uses **oscdimg** (Windows ADK "Deployment Tools"), not IMAPI2. IMAPI2 was tried first but is unreliable for large dual-boot Windows media: on Server Core the `IMAPI2FS.MsftFileSystemImage` COM class is often unregistered (`0x80040154 REGDB_E_CLASSNOTREG`), its default size cap rejects an ~8 GB payload, and `CreateResultImage` fails with `0xC0AAB132`. oscdimg avoids all three.
+- oscdimg is a single ~2 MB binary. Install the ADK "Deployment Tools" feature, or copy just `oscdimg.exe` and pass `-OscdimgPath`. The script auto-detects it on PATH and in the default ADK location.
+- UDF (`-u2 -udfver102`) is used because the Windows install image inside can exceed the 4 GB ISO9660 per-file limit.
+- The boot catalog is rebuilt with BIOS (`boot\etfsboot.com`, when present) + UEFI (`efi\microsoft\boot\efisys_noprompt.bin`) so the ISO stays bootable and skips the "Press any key to boot from CD/DVD" prompt.
+- Building needs free disk ~2x the ISO size (staging copy + output). Run on a host with space (your PC or the jump host).
 - Disk selection stays interactive (pick the BOSS RAID-1 `OS` volume) to protect the S2D data disks.
 - Validate the first rebuilt ISO by booting one node before using it on both.
 

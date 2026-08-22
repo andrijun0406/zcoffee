@@ -10,22 +10,36 @@
     bake Autounattend.xml into the root of the golden ISO itself, so Windows Setup auto-discovers
     it from the one mounted image.
 
-    This script rebuilds the ISO natively with Windows IMAPI2 (no Windows ADK, no Python):
-      - Mounts the source golden ISO read-only (Mount-DiskImage).
-      - Copies its entire file tree into the new image, PLUS Autounattend.xml at the root.
-      - Enables UDF (the install.wim/.esd inside can exceed the 4 GB ISO9660 per-file limit).
-      - Re-assigns the UEFI El Torito boot image (efi\microsoft\boot\efisys_noprompt.bin,
-        falling back to efisys.bin) so the result stays UEFI-bootable. 'noprompt' also removes
-        the "Press any key to boot from CD/DVD" gate for hands-off installs.
+    This script rebuilds the ISO with oscdimg (Microsoft's supported tool for repacking bootable
+    Windows media). oscdimg handles large UDF payloads (install.wim/.esd > 4 GB) and the dual
+    BIOS+UEFI El Torito boot catalog correctly - unlike IMAPI2, which fails on large dual-boot
+    Windows ISOs (error 0xC0AAB132 during CreateResultImage).
+
+    Steps:
+      - Mount the source golden ISO read-only (Mount-DiskImage).
+      - Robocopy its full file tree into a writable staging folder.
+      - Drop Autounattend.xml at the staging root.
+      - oscdimg repacks staging -> new ISO with UDF + BIOS(etfsboot.com) + UEFI(efisys*.bin) boot.
+        Prefers efisys_noprompt.bin (removes the "Press any key to boot" gate for hands-off install).
 
     Answer-file scope matches make-autounattend-iso.ps1 (locale, timezone, admin password;
     disk selection stays interactive to protect the S2D data disks).
 
+.REQUIREMENTS
+    oscdimg.exe must be available. It ships with the Windows ADK "Deployment Tools" feature:
+      https://learn.microsoft.com/windows-hardware/get-started/adk-install
+    Default install path:
+      C:\Program Files (x86)\Windows Kits\10\Assessment and Deployment Kit\Deployment Tools\amd64\Oscdimg\oscdimg.exe
+    oscdimg.exe is a single ~2 MB standalone binary - you can also copy just that one file to the
+    jump host and pass its path with -OscdimgPath. The script auto-detects it on PATH and in the
+    common ADK locations.
+
 .NOTES
     - The admin password is stored in the answer file as base64 (unattend obfuscation, NOT
       encryption). Treat the OUTPUT ISO as a secret; it is covered by .gitignore.
-    - Rebuilding an ~8 GB ISO takes time and free disk space equal to the ISO size.
-    - VALIDATE the first output by booting one node before relying on it for both.
+    - Rebuilding an ~8 GB ISO needs free disk space ~2x the ISO size (staging + output) and takes
+      several minutes.
+    - VALIDATE the first output by booting one node (single RFS) before relying on it for both.
 #>
 [CmdletBinding()]
 param(
@@ -36,7 +50,9 @@ param(
     [string]$Locale       = 'en-US',
     [string]$OwnerName    = 'Azure Local Lab',
     [string]$Organization = 'zcoffee',
-    [string]$VolumeName   = 'AZLOCAL_UA'
+    [string]$VolumeName   = 'AZLOCAL_UA',
+    [string]$OscdimgPath,                        # explicit path to oscdimg.exe (optional)
+    [string]$StagingDir                          # override staging folder (default: beside OutputIso)
 )
 
 Set-StrictMode -Version Latest
@@ -60,12 +76,47 @@ function Test-PasswordComplexity {
     return $problems
 }
 
+function Resolve-Oscdimg {
+    param([string]$Hint)
+    if ($Hint) {
+        if (Test-Path -LiteralPath $Hint -PathType Leaf) { return (Resolve-Path $Hint).Path }
+        throw "oscdimg not found at -OscdimgPath: $Hint"
+    }
+    $cmd = Get-Command oscdimg.exe -CommandType Application -ErrorAction SilentlyContinue
+    if ($cmd) { return $cmd.Source }
+    $candidates = @(
+        "${env:ProgramFiles(x86)}\Windows Kits\10\Assessment and Deployment Kit\Deployment Tools\amd64\Oscdimg\oscdimg.exe",
+        "${env:ProgramFiles}\Windows Kits\10\Assessment and Deployment Kit\Deployment Tools\amd64\Oscdimg\oscdimg.exe",
+        "${env:ProgramFiles(x86)}\Windows Kits\10\Assessment and Deployment Kit\Deployment Tools\x86\Oscdimg\oscdimg.exe"
+    )
+    foreach ($c in $candidates) { if ($c -and (Test-Path $c)) { return $c } }
+    return $null
+}
+
 Write-Step "make-golden-with-unattend starting."
 Write-Step "Source golden ISO: $GoldenIso"
 Write-Step "Output ISO:        $OutputIso"
 
 if (-not (Test-Path $GoldenIso -PathType Leaf)) { throw "Golden ISO not found: $GoldenIso" }
 $GoldenIso = (Resolve-Path $GoldenIso).Path
+
+# --- Resolve oscdimg first, before doing any heavy work ---
+$oscdimg = Resolve-Oscdimg -Hint $OscdimgPath
+if (-not $oscdimg) {
+    throw @"
+oscdimg.exe was not found. It is required to repack a bootable Windows ISO reliably.
+
+Get it one of these ways:
+  1. Install the Windows ADK 'Deployment Tools' feature:
+     https://learn.microsoft.com/windows-hardware/get-started/adk-install
+  2. Or copy just oscdimg.exe (a single ~2 MB file) from a machine that has the ADK, then re-run with:
+     -OscdimgPath C:\path\to\oscdimg.exe
+
+Default ADK location:
+  C:\Program Files (x86)\Windows Kits\10\Assessment and Deployment Kit\Deployment Tools\amd64\Oscdimg\oscdimg.exe
+"@
+}
+Write-Step "Using oscdimg: $oscdimg" 'Green'
 
 # --- Acquire and validate the administrator password ---
 if (-not $PSBoundParameters.ContainsKey('AdministratorPassword') -or $null -eq $AdministratorPassword) {
@@ -145,119 +196,98 @@ $xml = @"
 </unattend>
 "@
 
-# --- Native IStream-from-file helper (for the UEFI boot image) ---
-if (-not ('AzLocalIso.Native' -as [type])) {
-    Write-Step "Compiling native helpers (Add-Type -> csc.exe). First run can take 10-30s..." 'Yellow'
-    Add-Type -Language CSharp -TypeDefinition @'
-using System;
-using System.IO;
-using System.Runtime.InteropServices;
-using System.Runtime.InteropServices.ComTypes;
-
-namespace AzLocalIso {
-    public static class Native {
-        [DllImport("shlwapi.dll", CharSet = CharSet.Unicode, ExactSpelling = true, SetLastError = true)]
-        static extern int SHCreateStreamOnFileEx(
-            string file, uint grfMode, uint dwAttributes, bool fCreate, IStream pstmTemplate, out IStream ppstm);
-
-        // STGM_READ = 0, FILE_ATTRIBUTE_NORMAL = 0x80
-        public static IStream StreamFromFile(string path) {
-            IStream s;
-            int hr = SHCreateStreamOnFileEx(path, 0u, 0x80u, false, null, out s);
-            if (hr != 0) throw new IOException("SHCreateStreamOnFileEx failed 0x" + hr.ToString("X8") + " for " + path);
-            return s;
-        }
-    }
-    public static class IsoWriter {
-        public static void Create(string path, object comStream, int blockSize, int totalBlocks) {
-            IStream stream = (IStream)comStream;
-            using (FileStream fs = File.OpenWrite(path)) {
-                byte[] buffer = new byte[blockSize];
-                IntPtr read = Marshal.AllocHGlobal(sizeof(int));
-                try {
-                    while (totalBlocks-- > 0) {
-                        stream.Read(buffer, blockSize, read);
-                        int got = Marshal.ReadInt32(read);
-                        fs.Write(buffer, 0, got);
-                    }
-                    fs.Flush();
-                }
-                finally { Marshal.FreeHGlobal(read); }
-            }
-        }
-    }
-}
-'@
-    Write-Step "Native helpers compiled." 'Green'
-}
-else { Write-Step "Native helpers already loaded; skipping compile." }
-
 $mounted = $null
-$fsi = $null
-$stagingXml = $null
 try {
     # --- Mount the golden ISO read-only ---
     Write-Step "Mounting golden ISO read-only..."
     $mounted = Mount-DiskImage -ImagePath $GoldenIso -PassThru
     Start-Sleep -Seconds 2
     $vol = ($mounted | Get-Volume)
-    $drive = ($vol.DriveLetter + ':')
     if (-not $vol.DriveLetter) { throw 'Could not determine the mounted ISO drive letter.' }
+    $drive = ($vol.DriveLetter + ':')
     Write-Step "Golden ISO mounted at $drive"
 
-    # --- Locate the UEFI boot image inside the ISO ---
-    $noprompt = Join-Path $drive 'efi\microsoft\boot\efisys_noprompt.bin'
-    $prompt   = Join-Path $drive 'efi\microsoft\boot\efisys.bin'
-    if     (Test-Path $noprompt) { $efiBoot = $noprompt; Write-Step "Using UEFI boot image: efisys_noprompt.bin (no 'press any key' prompt)." }
-    elseif (Test-Path $prompt)   { $efiBoot = $prompt;   Write-Step "efisys_noprompt.bin not found; using efisys.bin ('press any key' prompt will appear)." 'Yellow' }
+    # --- Locate boot images inside the ISO ---
+    $efiNoPrompt = Join-Path $drive 'efi\microsoft\boot\efisys_noprompt.bin'
+    $efiPrompt   = Join-Path $drive 'efi\microsoft\boot\efisys.bin'
+    if     (Test-Path $efiNoPrompt) { $efiRel = 'efi\microsoft\boot\efisys_noprompt.bin'; Write-Step "UEFI boot image: efisys_noprompt.bin (no 'press any key' prompt)." }
+    elseif (Test-Path $efiPrompt)   { $efiRel = 'efi\microsoft\boot\efisys.bin';          Write-Step "efisys_noprompt.bin not found; using efisys.bin ('press any key' prompt will appear)." 'Yellow' }
     else { throw "No UEFI boot image found under $drive\efi\microsoft\boot\. Is this a UEFI Windows/Azure Local ISO?" }
 
-    # --- Stage Autounattend.xml ---
-    $stagingXml = Join-Path ([IO.Path]::GetTempPath()) ("Autounattend_" + [Guid]::NewGuid().ToString('N') + '.xml')
-    Set-Content -LiteralPath $stagingXml -Value $xml -Encoding UTF8
-    Write-Step "Answer file staged."
+    $biosRel = $null
+    if (Test-Path (Join-Path $drive 'boot\etfsboot.com')) { $biosRel = 'boot\etfsboot.com' }
 
-    # --- Build the new image with IMAPI2 (ISO9660 + Joliet + UDF for >4GB files) ---
-    Write-Step "Creating IMAPI2 file system image (ISO9660 + Joliet + UDF)..."
-    $fsi = New-Object -ComObject IMAPI2FS.MsftFileSystemImage
-    $fsi.FileSystemsToCreate = 7            # 1 ISO9660 + 2 Joliet + 4 UDF
-    try { $fsi.UDFRevision = 0x102 } catch { }   # UDF 1.02 (matches Windows install media)
-    $fsi.VolumeName = $VolumeName
+    # --- Staging folder (needs ~ISO size free) ---
+    if (-not $StagingDir) {
+        $outDir = Split-Path -Parent $OutputIso
+        if (-not $outDir) { $outDir = (Get-Location).Path }
+        $StagingDir = Join-Path $outDir ('_ua_stage_' + [Guid]::NewGuid().ToString('N').Substring(0,8))
+    }
+    if (Test-Path $StagingDir) { Remove-Item $StagingDir -Recurse -Force }
+    New-Item -ItemType Directory -Path $StagingDir -Force | Out-Null
+    Write-Step "Staging folder: $StagingDir"
 
-    Write-Step "Adding golden ISO contents to the image (this can take several minutes for ~8 GB)..."
-    $fsi.Root.AddTree($drive, $false)
+    # --- Copy the full ISO tree to staging (robocopy handles long paths + retries) ---
+    Write-Step "Copying golden ISO contents to staging (several minutes for ~8 GB)..."
+    $rc = Start-Process -FilePath robocopy.exe `
+        -ArgumentList @("`"$drive\`"", "`"$StagingDir`"", '/E', '/COPY:DAT', '/R:2', '/W:2', '/NP', '/NFL', '/NDL', '/NJH', '/NJS') `
+        -Wait -PassThru -WindowStyle Hidden
+    # robocopy exit codes < 8 are success (0-7). >=8 is a real failure.
+    if ($rc.ExitCode -ge 8) { throw "robocopy failed copying ISO contents (exit $($rc.ExitCode))." }
+    Write-Step "Copy complete (robocopy exit $($rc.ExitCode))." 'Green'
 
-    Write-Step "Adding Autounattend.xml at the image root..."
-    $fsi.Root.AddFile('Autounattend.xml', [AzLocalIso.Native]::StreamFromFile($stagingXml))
+    # --- Drop Autounattend.xml at the staging root ---
+    $xmlPath = Join-Path $StagingDir 'Autounattend.xml'
+    Set-Content -LiteralPath $xmlPath -Value $xml -Encoding UTF8
+    Write-Step "Autounattend.xml written to staging root."
 
-    # --- Assign the UEFI El Torito boot image ---
-    Write-Step "Assigning UEFI (EFI) El Torito boot image..."
-    $boot = New-Object -ComObject IMAPI2FS.BootOptions
-    $boot.AssignBootImage([AzLocalIso.Native]::StreamFromFile($efiBoot))
-    $boot.PlatformId = 0xEF      # EFI
-    $boot.Emulation  = 0         # EmulationNone
-    $boot.Manufacturer = 'Microsoft'
-    $fsi.BootImageOptions = $boot
+    # --- Dismount the source ISO (no longer needed once copied) ---
+    Write-Step "Dismounting source golden ISO..."
+    Dismount-DiskImage -ImagePath $GoldenIso -ErrorAction SilentlyContinue | Out-Null
+    $mounted = $null
 
-    Write-Step "Rendering ISO image stream (CreateResultImage)..."
-    $result = $fsi.CreateResultImage()
-    $totalBlocks = $result.TotalBlocks
-    $blockSize   = $result.BlockSize
-    $sizeGb = [math]::Round(($totalBlocks * $blockSize) / 1GB, 2)
-    Write-Step ("Image ready: {0} blocks x {1} bytes (~{2} GB). Writing to disk..." -f $totalBlocks, $blockSize, $sizeGb)
+    # --- Build boot arguments (BIOS + UEFI when both present, else UEFI only) ---
+    $biosFull = if ($biosRel) { Join-Path $StagingDir $biosRel } else { $null }
+    $efiFull  = Join-Path $StagingDir $efiRel
+    if ($biosFull) {
+        $bootData = "2#p0,e,b$biosFull#pEF,e,b$efiFull"
+        Write-Step "Boot catalog: BIOS (etfsboot.com) + UEFI (efisys)."
+    } else {
+        $bootData = "1#pEF,e,b$efiFull"
+        Write-Step "Boot catalog: UEFI only (no etfsboot.com in source)." 'Yellow'
+    }
 
-    $outDir = Split-Path -Parent $OutputIso
-    if ($outDir -and -not (Test-Path $outDir)) { New-Item -ItemType Directory -Path $outDir -Force | Out-Null }
-    if (Test-Path $OutputIso) { Write-Step "Removing existing $OutputIso before write..."; Remove-Item $OutputIso -Force }
+    # --- Prepare output path ---
+    $outDir2 = Split-Path -Parent $OutputIso
+    if ($outDir2 -and -not (Test-Path $outDir2)) { New-Item -ItemType Directory -Path $outDir2 -Force | Out-Null }
+    if (Test-Path $OutputIso) { Write-Step "Removing existing $OutputIso..."; Remove-Item $OutputIso -Force }
 
-    [AzLocalIso.IsoWriter]::Create($OutputIso, $result.ImageStream, $blockSize, $totalBlocks)
+    # --- Run oscdimg ---
+    #   -m           : ignore the default image size limit (large media)
+    #   -o           : optimize storage by encoding duplicate files once
+    #   -u2          : produce a pure UDF file system (supports >4 GB files)
+    #   -udfver102   : UDF 1.02 (matches Windows install media)
+    #   -l<label>    : volume label
+    #   -bootdata    : boot catalog entries assembled above
+    $oscArgs = @(
+        '-m', '-o', '-u2', '-udfver102',
+        "-l$VolumeName",
+        "-bootdata:$bootData",
+        "`"$StagingDir`"",
+        "`"$OutputIso`""
+    )
+    Write-Step "Running oscdimg to build the bootable ISO..."
+    Write-Host ("oscdimg> {0} {1}" -f $oscdimg, ($oscArgs -join ' ')) -ForegroundColor DarkGray
+    $proc = Start-Process -FilePath $oscdimg -ArgumentList $oscArgs -Wait -PassThru -NoNewWindow
+    if ($proc.ExitCode -ne 0) { throw "oscdimg failed with exit code $($proc.ExitCode)." }
 
+    if (-not (Test-Path $OutputIso)) { throw "oscdimg reported success but no output ISO was produced." }
     $sizeGbOut = [math]::Round((Get-Item $OutputIso).Length / 1GB, 2)
-    Write-Step "ISO write complete." 'Green'
+    Write-Step "ISO build complete." 'Green'
     Write-Host ""
     Write-Host "Created unattended golden ISO: $OutputIso ($sizeGbOut GB)" -ForegroundColor Green
     Write-Host "Locale: $Locale   TimeZone: $TimeZone" -ForegroundColor Cyan
-    Write-Host "Boot: UEFI El Torito (single RFS mount, no RFS2 needed)." -ForegroundColor Cyan
+    Write-Host "Boot: $(if($biosRel){'BIOS + UEFI'}else{'UEFI'}) El Torito (single RFS mount, no RFS2 needed)." -ForegroundColor Cyan
     Write-Host "Treat this ISO as a secret (it contains the obfuscated admin password); it is gitignored." -ForegroundColor Yellow
     Write-Host ""
     Write-Host "Deploy with a SINGLE RFS mount:" -ForegroundColor Cyan
@@ -265,11 +295,13 @@ try {
     Write-Host "    -ISOFile $OutputIso -StartInstallation -NoCertWarn" -ForegroundColor Gray
 }
 finally {
-    if ($stagingXml -and (Test-Path $stagingXml)) { Remove-Item $stagingXml -Force -ErrorAction SilentlyContinue }
-    if ($fsi) { [void][Runtime.InteropServices.Marshal]::ReleaseComObject($fsi) }
     if ($mounted) {
         Write-Step "Dismounting golden ISO..."
         Dismount-DiskImage -ImagePath $GoldenIso -ErrorAction SilentlyContinue | Out-Null
+    }
+    if ($StagingDir -and (Test-Path $StagingDir)) {
+        Write-Step "Cleaning up staging folder..."
+        Remove-Item $StagingDir -Recurse -Force -ErrorAction SilentlyContinue
     }
     $xml = $null; $adminB64 = $null
     Write-Step "Done." 'Green'
