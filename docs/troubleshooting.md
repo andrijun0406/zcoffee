@@ -5,6 +5,7 @@ Each stage writes a timestamped log to `logs/<stage>-<yyyyMMdd-HHmmss>.log` and 
 ## Stage 1 — OS deployment
 | Symptom | Likely cause | Fix |
 |---------|--------------|-----|
+| **Golden ISO won't boot; F11 shows "Virtual Network File 2" but NOT "Virtual Network File 1"** | **A second RFS image is mounted** (`remoteimage2`, e.g. a separate Autounattend ISO). On R650 BIOS 1.12.1 this stops the golden ISO on RFS1 from enumerating as bootable. **This was the true root cause** behind the repeated boot failures. | Mount ONLY the golden ISO (single RFS). Bake the answer file into the golden ISO with `make-golden-with-unattend.ps1`. See below. |
 | "ISO server not reachable" | Bound to loopback/wildcard, or firewall | Pass a reachable `-HttpHost` (e.g. `10.8.230.225`); allow TCP 8080 to both iDRACs |
 | RACADM "not found" | RACADM not on PATH | Install Dell iDRAC Tools or pass `-RACADMPath` |
 | iDRAC connect fails | Wrong iDRAC IP/creds or HTTPS blocked | Verify iDRAC `10.8.230.84` / `10.8.230.86`, port 443, credentials |
@@ -16,6 +17,8 @@ Each stage writes a timestamped log to `logs/<stage>-<yyyyMMdd-HHmmss>.log` and 
 | Node boots to PXE instead of the ISO | One-time boot override unreliable on old BIOS | Update BIOS; or press F11 → One-shot UEFI Boot Menu → Virtual Optical Drive |
 | BOSS "fewer than 2 physical disks" | (fixed) parser now reads `Disk.Direct` AHCI disks | Ensure you're on the current `prepare-hardware.ps1` |
 | Setup asks for a "media driver" mid-install | ISO was detached while installing | Never run a second (mount-only) bootstrap during an install — it detaches media on all targeted nodes. Re-run `-OnlyNode <n> -StartInstallation` |
+| Auto disk-select stopped; Setup shows the disk screen | BOSS detection was ambiguous (0 or >1 candidates) — the safety guard halted before touching any disk | Check `%SystemDrive%\Windows\Temp\bootdisk-select.log` in WinPE (Shift+F10); pick BOSS manually, or tune `-BootDiskModelMatch` / `-BootDiskMaxSizeGB` when rebuilding the ISO |
+| Install landed on the wrong disk | A non-BOSS disk had a Windows-eligible partition and was picked by `InstallToAvailablePartition` | On HCI nodes only BOSS should hold a Windows partition; recreate the BOSS VD (`-RecreateBossVd`) and ensure S2D disks are clean, or rebuild the ISO with `-InteractiveDiskSelect` |
 | ISO hash mismatch | Wrong or corrupt ISO | Re-download the Dell Golden Image; verify `-ExpectedISOHash` |
 | **"No compatible bootloader available"** (or boots via iDRAC HTML5 native Map CD/DVD but NOT via the script) | **Single-threaded `serve-iso.ps1`** could not satisfy the iDRAC boot-time streaming pattern (many concurrent HTTP Range reads) | Use the current multi-threaded, Range-aware `serve-iso.ps1`. See below. |
 
@@ -49,7 +52,7 @@ Note: RFS1 and RFS2 share one Remote File Share service, so a wedge on either sl
 ### Secure Boot boot failure (known issue, confirmed on this lab)
 Symptom: the Golden Image will not boot from the Virtual Optical Drive even when selected manually via F11; the node reports `Boot Failed: Virtual Optical Drive` almost immediately.
 
-Root cause: on very old BIOS (e.g. R650 BIOS **1.4.4**), the UEFI Secure Boot certificate store predates the Azure Local 24H2 Golden Image bootloader signature, so Secure Boot rejects it. This is **not** a VPN, HTTP-server, or media problem — the ISO mounts and streams fine over the Sangfor VPN.
+Root cause (as originally theorized): on very old BIOS, the UEFI Secure Boot certificate store predates the Golden Image bootloader signature. **Update (superseded):** on this lab, disabling Secure Boot and even updating BIOS 1.4.4 → 1.12.1 did NOT resolve the boot failure. The confirmed root cause was a second RFS image blocking golden-ISO boot (see "The real root cause" section above). Keep Secure Boot disabled only as a temporary install workaround and re-enable it before Stage 5 regardless.
 
 Confirm and fix:
 ```powershell
@@ -92,7 +95,55 @@ When booting two nodes over a client VPN, the two iDRACs pulling the boot image 
 
 If a single node still cannot boot the ISO over the VPN even sequentially, the bottleneck is the iDRAC's own reverse path to your PC over Sangfor (the native HTML5 map avoids this by streaming through the console channel). In that case the **jump host inside the DC is the durable fix** — it gives the iDRAC a LAN-speed, low-latency read.
 
-Note: the earlier Secure Boot section's "not an HTTP-server problem" statement applies to *that* symptom (immediate Boot Failed with Secure Boot Enabled). This is a distinct, separately-fixed HTTP-server issue.
+Note (superseded): the multi-threaded server and sequential/VPN tuning were real improvements, but they did NOT fix the boot failure on this lab. The confirmed root cause was a second RFS image (RFS2) blocking golden-ISO boot — see "The real root cause" section above. Use a single RFS mount with `make-golden-with-unattend.ps1`.
+
+### The real root cause: a second RFS image blocks golden-ISO boot (CONFIRMED)
+
+Symptom: the golden ISO will not boot. In the F11 → UEFI one-shot boot menu, **"Virtual Network File 2"** is listed (that is `remoteimage2` / RFS2, the small Autounattend ISO) but **"Virtual Network File 1"** (the golden ISO on RFS1) is absent — even though `racadm remoteimage -s` reports RFS1 **Enabled** with the correct ShareName. Selecting VNF2 fails to boot (correctly — it is only the answer-file image).
+
+Root cause: on R650 BIOS **1.12.1**, mounting a second RFS image prevents the large golden ISO on RFS1 from presenting as a bootable UEFI device. With RFS2 detached, RFS1 immediately becomes bootable (the boot order falls through Windows Boot Manager → PXE → **Virtual Optical Drive**, which boots).
+
+This finding supersedes the earlier theories in the two sections below. The definitive elimination sequence for this lab was:
+- Disabling Secure Boot did **not** fix it on its own.
+- Updating BIOS 1.4.4 → 1.12.1 did **not** fix it.
+- Serving from a **jump host on the DC LAN** (no VPN) did **not** fix it — so the Sangfor VPN and the HTTP server were not the cause either.
+- **Detaching RFS2 fixed it.** The golden ISO booted to Windows Setup (EMS) with a single RFS mount.
+- The iDRAC HTML5 native **Map CD/DVD** always worked because it presents as "Virtual Optical Drive" (console media), a different device that this BIOS enumerates reliably.
+
+Fix — single RFS mount with the answer file slipstreamed into the golden ISO:
+
+```powershell
+# Build the unattended golden ISO (oscdimg; UDF + BIOS/UEFI El Torito efisys_noprompt.bin)
+.\make-golden-with-unattend.ps1 `
+  -GoldenIso ..\..\isos\AzureLocal24H2.<...>_A01.en-us.iso `
+  -OutputIso ..\..\isos\AzureLocal-unattend.iso
+
+# Deploy with ONE RFS mount (no RFS2)
+.\bootstrap-cluster.ps1 -Stage 01-deploy-os -HttpHost <server-ip> `
+  -ISOFile ..\..\isos\AzureLocal-unattend.iso -StartInstallation -NoCertWarn
+```
+
+The `01-deploy-os.ps1`/`deploy-os.ps1` worker no longer mounts RFS2 at all, and actively clears any stale RFS2 before mounting RFS1. The older `make-autounattend-iso.ps1` (separate RFS2 ISO) is deprecated — use `make-golden-with-unattend.ps1`.
+
+Notes on the slipstream:
+- The rebuild uses **oscdimg** (Windows ADK "Deployment Tools"), not IMAPI2. IMAPI2 was tried first but is unreliable for large dual-boot Windows media: on Server Core the `IMAPI2FS.MsftFileSystemImage` COM class is often unregistered (`0x80040154 REGDB_E_CLASSNOTREG`), its default size cap rejects an ~8 GB payload, and `CreateResultImage` fails with `0xC0AAB132`. oscdimg avoids all three.
+- oscdimg is a single ~2 MB binary. Install the ADK "Deployment Tools" feature, or copy just `oscdimg.exe` and pass `-OscdimgPath`. The script auto-detects it on PATH and in the default ADK location.
+- UDF (`-u2 -udfver102`) is used because the Windows install image inside can exceed the 4 GB ISO9660 per-file limit.
+- The boot catalog is rebuilt with BIOS (`boot\etfsboot.com`, when present) + UEFI (`efi\microsoft\boot\efisys_noprompt.bin`) so the ISO stays bootable and skips the "Press any key to boot from CD/DVD" prompt.
+- Building needs free disk ~2x the ISO size (staging copy + output). Run on a host with space (your PC or the jump host).
+- Disk selection stays interactive (pick the BOSS RAID-1 `OS` volume) to protect the S2D data disks.
+- Validate the first rebuilt ISO by booting one node before using it on both.
+
+### Automatic BOSS boot-disk selection (default)
+
+The unattended golden ISO (built by `make-golden-with-unattend.ps1`) auto-selects and partitions the BOSS boot volume during WinPE, so the install is fully hands-off. Detection is by the **BOSS controller identity** (the RAID-1 VD enumerates with a `BOSS` friendly name), which is **model-agnostic** — it works for R650 BOSS-S2 (223 GB), R670 BOSS-N1 (960 GB), etc., so no BOSS size is hardcoded or configured.
+
+- The BOSS size is **discovered at deploy time**, not stored in `lab-config.psd1`.
+- **Safety guard:** if 0 or more than 1 disk matches, the WinPE command exits non-zero and stops before touching any disk — it will never install onto an S2D data/cache disk. You then select manually.
+- **Assumption:** on an Azure Local node only BOSS holds a Windows partition; the data/cache disks do not. Keep them clean (recreate BOSS with `-RecreateBossVd` on redeploy).
+- **Opt out:** rebuild the ISO with `-InteractiveDiskSelect` to pause at the disk screen (pick the BOSS RAID-1 `OS` volume).
+- **Logs:** the selection writes `%SystemDrive%\Windows\Temp\bootdisk-select.log` in WinPE (open a console with Shift+F10 during Setup to read it).
+- **Requires** WinPE PowerShell in the Setup boot image (the Dell Azure Local golden image includes it). If auto-select never runs, use `-InteractiveDiskSelect`.
 
 ## Stage 2 — Host networking
 | Symptom | Likely cause | Fix |

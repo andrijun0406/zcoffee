@@ -12,6 +12,7 @@ zcoffee/
 ├── docs/
 │   ├── lab-architecture.md
 │   ├── deployment-guide.md
+│   ├── deployment-journey.md    # chronological problem-and-fix decision log (Stage 1)
 │   ├── troubleshooting.md
 │   └── odin-config-report.md
 ├── scripts/
@@ -22,9 +23,10 @@ zcoffee/
 │   │   ├── bootstrap-cluster.ps1      # stage dispatcher (+ -UseGui)
 │   │   ├── ui-common.ps1              # shared dashboard / logging / GUI + config loader
 │   │   ├── preflight-os.ps1           # non-destructive OS prerequisite checks
-│   │   ├── deploy-os.ps1              # RACADM worker (mount ISO/RFS2, optional boot)
+│   │   ├── deploy-os.ps1              # RACADM worker (single-RFS mount, optional boot)
 │   │   ├── prepare-hardware.ps1       # firmware check/update + BOSS boot VD recreate
-│   │   ├── make-autounattend-iso.ps1  # builds Autounattend ISO into ../../isos/
+│   │   ├── make-golden-with-unattend.ps1 # slipstreams Autounattend.xml INTO the golden ISO via oscdimg (single RFS)
+│   │   ├── make-autounattend-iso.ps1  # DEPRECATED (separate RFS2 ISO; breaks boot on this firmware)
 │   │   ├── serve-iso.ps1              # native PowerShell ISO HTTP server (no Python)
 │   │   ├── 01-deploy-os.ps1
 │   │   ├── 02-configure-network.ps1
@@ -34,7 +36,7 @@ zcoffee/
 │   │   └── 06-validate-cluster.ps1
 │   └── arm-templates/
 │       └── azure-local.parameters.example.json
-└── isos/                              # golden image + generated autounattend.iso (gitignored)
+└── isos/                              # golden image + generated unattended ISO (gitignored)
 ```
 
 ## Prerequisites
@@ -98,6 +100,15 @@ cd zcoffee/scripts/powershell
 - `isos/` and `logs/` are gitignored.
 - DNS forwarder is defined once in `lab-config.psd1` as `10.8.230.51`. Update the ODIN report to match. DNS server IPs cannot change after deployment, so confirm before deploying.
 - Azure resource and DNS names are lowercase, no hyphens (for example `azljkt01clu`).
+
+## Deployment notes
+
+The Stage 1 OS bring-up went through several dead ends before landing on the current
+design (single RFS mount + answer file slipstreamed into the golden ISO + automatic BOSS
+disk selection). The full problem-and-fix journey — including what ruled out Secure Boot,
+BIOS version, the VPN, and the HTTP server — is in
+[`docs/deployment-journey.md`](docs/deployment-journey.md). Symptom-to-fix lookups are in
+[`docs/troubleshooting.md`](docs/troubleshooting.md).
 
 ## Sources
 - Dell AX System for Azure Local Deployment and Operations Guide with Switchless Networking (Dell Info Hub).

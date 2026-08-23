@@ -15,8 +15,6 @@ param(
 
     [switch]$NoCertWarn,
 
-    [string]$AutounattendUrl,
-
     # Detach RFS1 (and RFS2) then exit. Leaves the iDRAC clean after a mount-only/check-only run.
     [switch]$DetachOnly
 )
@@ -230,11 +228,12 @@ try {
     Connect-RemoteImage -Slot 'remoteimage' -Url $ISOUrl
     Write-Host "Remote ISO mounted successfully on $NodeIP"
 
-    if ($AutounattendUrl) {
-        Write-Host "Attaching Autounattend image via RFS2 on $NodeIP"
-        Connect-RemoteImage -Slot 'remoteimage2' -Url $AutounattendUrl
-        Write-Host "Autounattend image attached via RFS2 on $NodeIP"
-    }
+    # NOTE: A second RFS image (remoteimage2) is deliberately NOT mounted.
+    # On R650 BIOS 1.12.1, mounting a second RFS image prevents the golden ISO
+    # on RFS1 from enumerating as a bootable UEFI device (only "Virtual Network
+    # File 2" appears; VNF1 is absent and the node cannot boot the installer).
+    # The unattended answer file is slipstreamed into the golden ISO instead
+    # (see make-golden-with-unattend.ps1), so a single RFS mount is all we need.
 
     if ($StartInstallation) {
         Write-Host 'Setting one-time boot to virtual CD/DVD'
