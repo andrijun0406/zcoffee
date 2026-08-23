@@ -22,8 +22,12 @@
       - oscdimg repacks staging -> new ISO with UDF + BIOS(etfsboot.com) + UEFI(efisys*.bin) boot.
         Prefers efisys_noprompt.bin (removes the "Press any key to boot" gate for hands-off install).
 
-    Answer-file scope matches make-autounattend-iso.ps1 (locale, timezone, admin password;
-    disk selection stays interactive to protect the S2D data disks).
+    Answer-file scope: locale, timezone, admin password, and (by default) AUTOMATIC BOSS
+    boot-disk selection + partitioning in WinPE. Auto-selection finds the BOSS RAID-1 VD by its
+    controller identity (a 'BOSS' friendly name), so it is model-agnostic - no disk size needs to
+    be configured (works for R650 BOSS-S2 223 GB, R670 BOSS-N1 960 GB, etc.). If detection is
+    ambiguous it stops safely instead of risking a wrong-disk install. Use -InteractiveDiskSelect
+    to opt out and pause at the disk screen instead.
 
 .REQUIREMENTS
     oscdimg.exe must be available. It ships with the Windows ADK "Deployment Tools" feature:
@@ -52,7 +56,16 @@ param(
     [string]$Organization = 'zcoffee',
     [string]$VolumeName   = 'AZLOCAL_UA',
     [string]$OscdimgPath,                        # explicit path to oscdimg.exe (optional)
-    [string]$StagingDir                          # override staging folder (default: beside OutputIso)
+    [string]$StagingDir,                         # override staging folder (default: beside OutputIso)
+
+    # --- Automatic boot-disk (BOSS) selection ---
+    # Default: auto-select and partition the BOSS boot VD during WinPE, so the install is fully
+    # hands-off. Detection is by the BOSS controller's IDENTITY (its RAID-1 VD enumerates with a
+    # 'BOSS' friendly name) - model-agnostic, so it works whether BOSS is 223 GB (R650 BOSS-S2),
+    # 960 GB (R670 BOSS-N1), or any other size. No per-model size needs to be configured.
+    [switch]$InteractiveDiskSelect,              # opt OUT of auto-select; pause at the disk screen instead
+    [string]$BootDiskModelMatch = '(?i)boss',    # regex matched against disk FriendlyName/Model to find BOSS
+    [int]$BootDiskMaxSizeGB = 0                   # optional ceiling for the size-based FALLBACK only (0 = none)
 )
 
 Set-StrictMode -Version Latest
@@ -137,9 +150,81 @@ Write-Step "Password meets complexity requirements." 'Green'
 $adminB64 = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($plain + 'AdministratorPassword'))
 $plain = $null
 
+# --- Build the boot-disk auto-selection block (default) or leave interactive ---
+# When auto (default), a WinPE RunSynchronous command detects the BOSS boot VD by identity,
+# then diskpart cleans it and lays down the UEFI/GPT partitions. Setup installs to that
+# freshly-created Windows partition via InstallToAvailablePartition. If detection is ambiguous
+# (0 or >1 candidates) the command exits non-zero, which safely stops before touching any disk
+# instead of risking a wrong-disk install onto an S2D data disk.
+$diskSetupXml = ''
+$imageInstallXml = ''
+if (-not $InteractiveDiskSelect) {
+    $ceiling = [int]$BootDiskMaxSizeGB
+    $rx = $BootDiskModelMatch
+    # PowerShell that runs INSIDE WinPE during Windows Setup (windowsPE pass).
+    $peScript = @"
+`$ErrorActionPreference = 'Stop'
+`$log = "`$env:SystemDrive\Windows\Temp\bootdisk-select.log"
+function W(`$m){ `$t = (Get-Date).ToString('HH:mm:ss'); Add-Content -Path `$log -Value "`$t `$m"; Write-Host `$m }
+try {
+  `$rx = '$rx'
+  `$maxGb = $ceiling
+  `$all = Get-Disk | Where-Object { `$_.BusType -ne 'USB' }
+  foreach (`$d in `$all) { W ("disk {0}: '{1}' bus={2} size={3}GB" -f `$d.Number, `$d.FriendlyName, `$d.BusType, [math]::Round(`$d.Size/1GB)) }
+  # Primary: match the BOSS controller identity (size-independent, model-agnostic).
+  `$cand = `$all | Where-Object { `$_.FriendlyName -match `$rx -or `$_.Model -match `$rx }
+  if (-not `$cand) {
+    W "No disk matched /`$rx/ by name; falling back to smallest fixed disk."
+    `$fixed = `$all | Where-Object { `$_.BusType -in 'SATA','RAID','NVMe','SAS' }
+    if (`$maxGb -gt 0) { `$fixed = `$fixed | Where-Object { `$_.Size -le (`$maxGb * 1GB) } }
+    if (`$fixed) { `$min = (`$fixed | Measure-Object -Property Size -Minimum).Minimum; `$cand = `$fixed | Where-Object { `$_.Size -eq `$min } }
+  }
+  `$n = @(`$cand).Count
+  if (`$n -ne 1) { W "AMBIGUOUS: `$n candidate disks - stopping so the operator selects manually."; exit 2 }
+  `$disk = `$cand[0]
+  W ("Selected BOSS boot disk {0}: '{1}' ({2}GB)" -f `$disk.Number, `$disk.FriendlyName, [math]::Round(`$disk.Size/1GB))
+  `$dp = @(
+    "select disk `$(`$disk.Number)","clean","convert gpt",
+    "create partition efi size=500","format fs=fat32 quick","assign letter=S",
+    "create partition msr size=16",
+    "create partition primary","format fs=ntfs quick label=Windows","assign letter=W","exit"
+  ) -join "``r``n"
+  `$dpf = "`$env:SystemDrive\Windows\Temp\boss-diskpart.txt"
+  Set-Content -Path `$dpf -Value `$dp -Encoding ASCII
+  W "Running diskpart to partition the BOSS disk..."
+  diskpart /s `$dpf | Out-Null
+  W "Boot disk prepared."
+  exit 0
+} catch { W ("ERROR: " + `$_.Exception.Message); exit 3 }
+"@
+    $peBytes = [Text.Encoding]::Unicode.GetBytes($peScript)
+    $peB64   = [Convert]::ToBase64String($peBytes)
+    $runCmd  = "cmd /c powershell.exe -NoProfile -ExecutionPolicy Bypass -EncodedCommand $peB64"
+    $diskSetupXml = @"
+      <RunSynchronous>
+        <RunSynchronousCommand wcm:action="add">
+          <Order>1</Order>
+          <Path>$runCmd</Path>
+          <Description>Auto-select and partition the BOSS boot VD</Description>
+          <WillReboot>Never</WillReboot>
+        </RunSynchronousCommand>
+      </RunSynchronous>
+"@
+    $imageInstallXml = @"
+      <ImageInstall>
+        <OSImage>
+          <InstallToAvailablePartition>true</InstallToAvailablePartition>
+        </OSImage>
+      </ImageInstall>
+"@
+    Write-Step "Disk selection: AUTOMATIC (BOSS by identity /$rx/, diskpart partitioning in WinPE)." 'Green'
+} else {
+    Write-Step "Disk selection: INTERACTIVE (Setup will pause at the disk screen)." 'Yellow'
+}
+
 $xml = @"
 <?xml version="1.0" encoding="utf-8"?>
-<unattend xmlns="urn:schemas-microsoft-com:unattend">
+<unattend xmlns="urn:schemas-microsoft-com:unattend" xmlns:wcm="http://schemas.microsoft.com/WMIConfig/2002/State">
   <settings pass="windowsPE">
     <component name="Microsoft-Windows-International-Core-WinPE"
                processorArchitecture="amd64"
@@ -160,8 +245,7 @@ $xml = @"
         <FullName>$OwnerName</FullName>
         <Organization>$Organization</Organization>
       </UserData>
-      <!-- No DiskConfiguration by design: Setup stops only at the disk-selection
-           screen so the operator picks the BOSS RAID-1 volume, protecting the S2D disks. -->
+$diskSetupXml$imageInstallXml
     </component>
   </settings>
   <settings pass="oobeSystem">
@@ -296,6 +380,7 @@ try {
     Write-Host "Created unattended golden ISO: $OutputIso ($sizeGbOut GB)" -ForegroundColor Green
     Write-Host "Locale: $Locale   TimeZone: $TimeZone" -ForegroundColor Cyan
     Write-Host "Boot: $(if($biosRel){'BIOS + UEFI'}else{'UEFI'}) El Torito (single RFS mount, no RFS2 needed)." -ForegroundColor Cyan
+    Write-Host "Disk: $(if($InteractiveDiskSelect){'INTERACTIVE (operator picks BOSS at the disk screen)'}else{'AUTOMATIC (BOSS auto-selected + partitioned in WinPE)'})." -ForegroundColor Cyan
     Write-Host "Treat this ISO as a secret (it contains the obfuscated admin password); it is gitignored." -ForegroundColor Yellow
     Write-Host ""
     Write-Host "Deploy with a SINGLE RFS mount:" -ForegroundColor Cyan

@@ -2,12 +2,18 @@
 
 This guide maps the six-stage automation to the Dell AX System for Azure Local (switchless networking) and Microsoft Azure Local deployment flow. Every stage uses the shared `ui-common.ps1` dashboard (colored steps, progress, warnings/errors, elapsed time, per-stage log under `logs/`, optional `-UseGui` window).
 
+> [!NOTE]
+> For the chronological problem-and-fix account of the Stage 1 bring-up (what each
+> attempt ruled in or out, and why the design ended up as single-RFS + slipstreamed
+> answer file), see [`deployment-journey.md`](./deployment-journey.md).
+
 ## Table of contents
 
 - [Supportability and scope](#supportability-and-scope)
 - [Pre-deployment](#pre-deployment)
 - [Configuration source of truth](#configuration-source-of-truth)
 - [Tooling prerequisites](#tooling-prerequisites)
+- [Running from a jump host (VPN / Server Core)](#running-from-a-jump-host-vpn--server-core)
 - [Stage 1 — OS deployment](#stage-1--os-deployment-01-deploy-osps1)
 - [Stage 2 — Host networking](#stage-2--host-networking-02-configure-networkps1)
 - [Stage 3 — Node preparation](#stage-3--node-preparation-03-prepare-nodeps1)
@@ -132,15 +138,99 @@ The fix is a single RFS mount with the answer file slipstreamed into the golden 
   -GoldenIso ..\..\isos\AzureLocal24H2.<...>_A01.en-us.iso `
   -OutputIso ..\..\isos\AzureLocal-unattend.iso
 
-# 2. Deploy with ONE RFS mount (no RFS2). Fully unattended except the disk-selection screen.
+# 2. Deploy with ONE RFS mount (no RFS2). Fully unattended, including automatic BOSS disk selection.
 .\bootstrap-cluster.ps1 -Stage 01-deploy-os -HttpHost <server-ip> `
   -ISOFile ..\..\isos\AzureLocal-unattend.iso -StartInstallation -NoCertWarn
 ```
 
-`make-golden-with-unattend.ps1` repacks the ISO with **oscdimg**: it mounts the golden ISO, robocopies the tree to a staging folder, drops `Autounattend.xml` at the root, and rebuilds with UDF (the install image inside can exceed the 4 GB ISO9660 limit) plus the BIOS+UEFI El Torito boot catalog (`efisys_noprompt.bin`, which also removes the "Press any key to boot" prompt). IMAPI2 was tried first but fails on large dual-boot Windows media (error `0xC0AAB132` in `CreateResultImage`) and is not registered on Server Core — oscdimg is the reliable, Microsoft-supported path. Building needs free disk ~2x the ISO size (staging + output). Disk selection stays interactive to protect the S2D data disks; select the BOSS RAID-1 `OS` volume. Validate the first output by booting one node before relying on it for both.
+`make-golden-with-unattend.ps1` repacks the ISO with **oscdimg**: it mounts the golden ISO, robocopies the tree to a staging folder, drops `Autounattend.xml` at the root, and rebuilds with UDF (the install image inside can exceed the 4 GB ISO9660 limit) plus the BIOS+UEFI El Torito boot catalog (`efisys_noprompt.bin`, which also removes the "Press any key to boot" prompt). IMAPI2 was tried first but fails on large dual-boot Windows media (error `0xC0AAB132` in `CreateResultImage`) and is not registered on Server Core — oscdimg is the reliable, Microsoft-supported path. Building needs free disk ~2x the ISO size (staging + output). Validate the first output by booting one node before relying on it for both.
+
+### Automatic BOSS boot-disk selection (default)
+
+By default the generated ISO selects and partitions the BOSS boot volume automatically, so the install is fully hands-off end to end. During WinPE, an embedded `RunSynchronous` command detects the BOSS RAID-1 VD by its **controller identity** (its disk enumerates with a `BOSS` friendly name), then `diskpart` cleans it and creates the UEFI/GPT layout; Setup installs to that partition via `InstallToAvailablePartition`.
+
+- **Model-agnostic — no size to configure.** Matching on the BOSS identity works whether BOSS is 223 GB (R650 BOSS-S2), 960 GB (R670 BOSS-N1), or any other size. So the BOSS size does **not** need to be a lab-config value; it is discovered at deploy time. (Per the Dell Private Cloud hardware configuration guide, BOSS card capacity varies by PowerEdge model — e.g. R670 ships BOSS-N1 with 2× M.2 960 GB RAID-1 — which is exactly why identity-based detection is used instead of a size threshold.)
+- **Safety guard.** If detection is ambiguous (0 or more than 1 candidate), the command exits non-zero and stops **before touching any disk**, so it can never install onto an S2D data disk by mistake — you then select manually.
+- **Assumption.** On an Azure Local node only the BOSS volume should hold a Windows partition; the S2D data/cache disks do not. The script cleans + partitions BOSS, and `InstallToAvailablePartition` targets that fresh Windows partition.
+- **Opt out:** pass `-InteractiveDiskSelect` to `make-golden-with-unattend.ps1` to skip auto-selection and have Setup pause at the disk screen instead (pick the BOSS RAID-1 `OS` volume).
+- **Tuning (rarely needed):** `-BootDiskModelMatch` (default `(?i)boss`) is the identity regex; `-BootDiskMaxSizeGB` is an optional ceiling used **only** by the smallest-disk fallback when no disk matches the regex.
 
 > [!NOTE]
 > The `01-deploy-os.ps1` worker no longer mounts a second RFS image at all; it actively clears any stale RFS2 before mounting RFS1. The older `make-autounattend-iso.ps1` (separate RFS2 ISO) is deprecated — use `make-golden-with-unattend.ps1` instead.
+
+## Running from a jump host (VPN / Server Core)
+
+If the management PC reaches the datacenter only over a client VPN (Sangfor), the iDRAC must
+open a connection *back* to that PC to pull the ISO. That reverse path was not the cause of
+the boot failures on this lab (see [`deployment-journey.md`](./deployment-journey.md)), but a
+jump host inside `10.8.230.0/24` is still the most robust place to serve the ISO — LAN-speed,
+low-latency, no VPN in the read path. The jump host here is **Windows Server Core**, which has
+a few gotchas worth capturing.
+
+### Getting the scripts and ISO onto the jump host
+
+- **Scripts:** clone the repo and `git pull` to sync. The clone is the runtime copy; edits are
+  made elsewhere and pulled here. This avoids the stale-copy drift that partial manual copies
+  caused during bring-up.
+
+    ```powershell
+    git clone https://github.com/andrijun0406/zcoffee.git C:\zcoffee
+    cd C:\zcoffee ; git pull        # after every change
+    ```
+
+- **Golden ISO:** it is gitignored (too large for Git), so it does **not** arrive via `git pull`.
+  Do **not** try to push the ~8 GB ISO across the VPN — both common paths fail:
+    - RDP drive redirection (`\\tsclient\...`) aborts on large files (`ERROR 995`, I/O aborted)
+      and is very slow.
+    - The admin share `\\host\C$` is blocked for local accounts by default
+      (`ERROR 1326`, bad username/password) due to UAC remote restrictions.
+- **Best approach — build the ISO on the jump host.** The golden ISO is already on the jump
+  host (it is what you boot from), so you only need to copy the ~2 MB `oscdimg.exe` (fine over
+  RDP), then run `make-golden-with-unattend.ps1` locally. Nothing large crosses the VPN.
+
+    If you must copy the 8 GB ISO instead, either enable local-account admin-share access on the
+    jump host (`LocalAccountTokenFilterPolicy = 1`) and robocopy to `C$`, or create a normal
+    share (`New-SmbShare -Name isodrop -Path C:\zcoffee\isos -FullAccess Administrator`) and copy
+    to that.
+
+### Installing RACADM on Server Core
+
+RACADM ships in **Dell iDRAC Tools for Windows** (`iDRACTools_x64.msi`). On Server Core:
+
+```powershell
+# Use an ABSOLUTE path and /qn. A relative ".\" path fails with MSI error 1324;
+# /qf (full UI) can misbehave on Core.
+msiexec.exe /i "C:\Dell\iDRACTools_x64.msi" /qn /norestart /l*v C:\Dell\racadm-install.log
+
+# Do NOT pass ADDLOCAL=RACADM — "RACADM" is not a valid feature name in this MSI and
+# aborts with "Error 2711 ... Feature name ('RACADM') not found" -> 1603. The default
+# install includes RACADM.
+
+& 'C:\Program Files\Dell\SysMgt\iDRACTools\racadm\racadm.exe' version
+```
+
+If `racadm` is not recognized in a shell, it is just a PATH issue for that session — either add
+`C:\Program Files\Dell\SysMgt\iDRACTools\racadm` to PATH (new shell), or pass the full path via
+`-RACADMPath`. The scripts and preflight already probe the default install location.
+
+### PowerShell edition on Server Core
+
+If the jump host only has **Windows PowerShell 5.1**, its `Invoke-WebRequest` tries to use the
+Internet Explorer parsing engine, which Server Core lacks
+(`The response content cannot be parsed because the Internet Explorer engine is not available`).
+The scripts pass `-UseBasicParsing` to avoid this (a no-op on PowerShell 7). Installing
+PowerShell 7 (`pwsh`) on the jump host keeps it consistent with the primary PC and avoids other
+5.1/Core quirks (for example, IMAPI2 COM is often unregistered on Core — one more reason the ISO
+build uses oscdimg, not IMAPI2).
+
+### Then run Stage 1 on the jump host
+
+```powershell
+cd C:\zcoffee\scripts\powershell
+.\bootstrap-cluster.ps1 -Stage 01-deploy-os -HttpHost 10.8.230.221 `
+  -RACADMPath 'C:\Program Files\Dell\SysMgt\iDRACTools\racadm\racadm.exe' `
+  -ISOFile ..\..\isos\AzureLocal-unattend.iso -StartInstallation -NoCertWarn
+```
 
 ## Stage 2 — Host networking (`02-configure-network.ps1`)
 

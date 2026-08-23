@@ -17,6 +17,8 @@ Each stage writes a timestamped log to `logs/<stage>-<yyyyMMdd-HHmmss>.log` and 
 | Node boots to PXE instead of the ISO | One-time boot override unreliable on old BIOS | Update BIOS; or press F11 → One-shot UEFI Boot Menu → Virtual Optical Drive |
 | BOSS "fewer than 2 physical disks" | (fixed) parser now reads `Disk.Direct` AHCI disks | Ensure you're on the current `prepare-hardware.ps1` |
 | Setup asks for a "media driver" mid-install | ISO was detached while installing | Never run a second (mount-only) bootstrap during an install — it detaches media on all targeted nodes. Re-run `-OnlyNode <n> -StartInstallation` |
+| Auto disk-select stopped; Setup shows the disk screen | BOSS detection was ambiguous (0 or >1 candidates) — the safety guard halted before touching any disk | Check `%SystemDrive%\Windows\Temp\bootdisk-select.log` in WinPE (Shift+F10); pick BOSS manually, or tune `-BootDiskModelMatch` / `-BootDiskMaxSizeGB` when rebuilding the ISO |
+| Install landed on the wrong disk | A non-BOSS disk had a Windows-eligible partition and was picked by `InstallToAvailablePartition` | On HCI nodes only BOSS should hold a Windows partition; recreate the BOSS VD (`-RecreateBossVd`) and ensure S2D disks are clean, or rebuild the ISO with `-InteractiveDiskSelect` |
 | ISO hash mismatch | Wrong or corrupt ISO | Re-download the Dell Golden Image; verify `-ExpectedISOHash` |
 | **"No compatible bootloader available"** (or boots via iDRAC HTML5 native Map CD/DVD but NOT via the script) | **Single-threaded `serve-iso.ps1`** could not satisfy the iDRAC boot-time streaming pattern (many concurrent HTTP Range reads) | Use the current multi-threaded, Range-aware `serve-iso.ps1`. See below. |
 
@@ -131,6 +133,17 @@ Notes on the slipstream:
 - Building needs free disk ~2x the ISO size (staging copy + output). Run on a host with space (your PC or the jump host).
 - Disk selection stays interactive (pick the BOSS RAID-1 `OS` volume) to protect the S2D data disks.
 - Validate the first rebuilt ISO by booting one node before using it on both.
+
+### Automatic BOSS boot-disk selection (default)
+
+The unattended golden ISO (built by `make-golden-with-unattend.ps1`) auto-selects and partitions the BOSS boot volume during WinPE, so the install is fully hands-off. Detection is by the **BOSS controller identity** (the RAID-1 VD enumerates with a `BOSS` friendly name), which is **model-agnostic** — it works for R650 BOSS-S2 (223 GB), R670 BOSS-N1 (960 GB), etc., so no BOSS size is hardcoded or configured.
+
+- The BOSS size is **discovered at deploy time**, not stored in `lab-config.psd1`.
+- **Safety guard:** if 0 or more than 1 disk matches, the WinPE command exits non-zero and stops before touching any disk — it will never install onto an S2D data/cache disk. You then select manually.
+- **Assumption:** on an Azure Local node only BOSS holds a Windows partition; the data/cache disks do not. Keep them clean (recreate BOSS with `-RecreateBossVd` on redeploy).
+- **Opt out:** rebuild the ISO with `-InteractiveDiskSelect` to pause at the disk screen (pick the BOSS RAID-1 `OS` volume).
+- **Logs:** the selection writes `%SystemDrive%\Windows\Temp\bootdisk-select.log` in WinPE (open a console with Shift+F10 during Setup to read it).
+- **Requires** WinPE PowerShell in the Setup boot image (the Dell Azure Local golden image includes it). If auto-select never runs, use `-InteractiveDiskSelect`.
 
 ## Stage 2 — Host networking
 | Symptom | Likely cause | Fix |

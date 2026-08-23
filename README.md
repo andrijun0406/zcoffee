@@ -12,6 +12,7 @@ zcoffee/
 ├── docs/
 │   ├── lab-architecture.md
 │   ├── deployment-guide.md
+│   ├── deployment-journey.md    # chronological problem-and-fix decision log (Stage 1)
 │   ├── troubleshooting.md
 │   └── odin-config-report.md
 ├── scripts/
@@ -99,6 +100,15 @@ cd zcoffee/scripts/powershell
 - `isos/` and `logs/` are gitignored.
 - DNS forwarder is defined once in `lab-config.psd1` as `10.8.230.51`. Update the ODIN report to match. DNS server IPs cannot change after deployment, so confirm before deploying.
 - Azure resource and DNS names are lowercase, no hyphens (for example `azljkt01clu`).
+
+## Deployment notes
+
+The Stage 1 OS bring-up went through several dead ends before landing on the current
+design (single RFS mount + answer file slipstreamed into the golden ISO + automatic BOSS
+disk selection). The full problem-and-fix journey — including what ruled out Secure Boot,
+BIOS version, the VPN, and the HTTP server — is in
+[`docs/deployment-journey.md`](docs/deployment-journey.md). Symptom-to-fix lookups are in
+[`docs/troubleshooting.md`](docs/troubleshooting.md).
 
 ## Sources
 - Dell AX System for Azure Local Deployment and Operations Guide with Switchless Networking (Dell Info Hub).
