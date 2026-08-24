@@ -30,7 +30,7 @@
     HttpPort       = 8080
 
     # Adapter names (must match the OS-reported names for Network ATC intents)
-    MgmtAdapters    = @('Integrated NIC1 Port 1-1', 'Integrated NIC1 Port 2-1')  # 10GbE, RDMA No
+    MgmtAdapters    = @('Integrated NIC 1 Port 1-1', 'Integrated NIC 1 Port 2-1')  # 10GbE, RDMA No
     StorageAdapters = @('SLOT 2 Port 1', 'SLOT 2 Port 2')                        # 25GbE, RDMA Yes (iWARP)
 
     # Host preparation
