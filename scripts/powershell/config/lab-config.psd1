@@ -34,7 +34,7 @@
     StorageAdapters = @('SLOT 2 Port 1', 'SLOT 2 Port 2')                        # 25GbE, RDMA Yes (iWARP)
 
     # Host preparation
-    LocalAdminUser = 'LabAdmin'
+    LocalAdminUser = 'Administrator'
     iDRACUser      = 'root'
 
     # Firmware catalog for hardware prep. Default pulls latest from Dell online.

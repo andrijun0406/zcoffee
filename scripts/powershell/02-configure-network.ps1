@@ -53,7 +53,7 @@ $b   = $PSBoundParameters
 
 # --- Resolve settings from config (parameters override) ---
 $LocalAdminUser = Resolve-Setting -Name 'LocalAdminUser' -Bound $b -Current $LocalAdminUser -ConfigKey 'LocalAdminUser' -Config $cfg
-if (-not $LocalAdminUser) { $LocalAdminUser = 'LabAdmin' }
+if (-not $LocalAdminUser) { $LocalAdminUser = 'Administrator' }
 
 if (-not $b.ContainsKey('NodeIPs')) {
     if ($cfg.ContainsKey('Nodes')) { $NodeIPs = @($cfg.Nodes | ForEach-Object { $_.HostIP }) }
