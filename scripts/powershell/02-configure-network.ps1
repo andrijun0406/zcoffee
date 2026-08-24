@@ -57,7 +57,7 @@ if (-not $LocalAdminUser) { $LocalAdminUser = 'LabAdmin' }
 
 if (-not $b.ContainsKey('NodeIPs')) {
     if ($cfg.ContainsKey('Nodes')) { $NodeIPs = @($cfg.Nodes | ForEach-Object { $_.HostIP }) }
-    else { $NodeIPs = @('10.8.230.71','10.8.230.72') }
+    else { $NodeIPs = @('10.8.230.232','10.8.230.235') }
 }
 
 if (-not $Port) { $Port = if ($Transport -eq 'HTTPS') { 5986 } else { 5985 } }
