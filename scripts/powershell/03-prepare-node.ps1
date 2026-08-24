@@ -198,11 +198,10 @@ $remoteCheck = {
         try {
             Import-Module AzStackHci.EnvironmentChecker -ErrorAction Stop
             $r.EnvCheckerRan = $true
-            if ($connectivityOnly) {
-                $res = Invoke-AzStackHciConnectivityValidation -PassThru -ErrorAction SilentlyContinue
-            } else {
-                $res = Invoke-AzStackHciConnectivityValidation -PassThru -ErrorAction SilentlyContinue
-            }
+            # The checker emits a cosmetic 'Failed to load XML document ... doctype' warning while
+            # parsing one of its own temp files. Suppress the warning stream (3>$null) and silence
+            # warnings; results in $res are unaffected.
+            $res = Invoke-AzStackHciConnectivityValidation -PassThru -ErrorAction SilentlyContinue -WarningAction SilentlyContinue 3>$null
             if ($res) {
                 $r.EnvChecker = @($res | ForEach-Object {
                     [pscustomobject]@{ Name = $_.Name; Status = "$($_.Status)" }
