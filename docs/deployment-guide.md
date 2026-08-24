@@ -59,7 +59,7 @@ This guide maps the six-stage automation to the Dell AX System for Azure Local (
 
     > [!IMPORTANT]
     > Without this rule, the `remoteimage` connect half-opens and the NEXT attempt fails with `RAC0718: Remote File Share service is busy`. See troubleshooting.
-- Azure CLI for Stage 5.
+- Az PowerShell modules `Az.Accounts` and `Az.Resources` on the jump host for Stages 4-5 (`Install-Module Az.Accounts,Az.Resources -Scope CurrentUser`). Azure CLI is not required.
 - Keep the Golden Image ISO under `isos/` (gitignored). Never commit ISOs.
 - For hands-off installs, bake the answer file INTO the golden ISO with `make-golden-with-unattend.ps1` (single RFS mount). Do NOT mount a separate Autounattend ISO as a second RFS device — see the single-RFS note below.
 - `make-golden-with-unattend.ps1` requires **oscdimg.exe** (Windows ADK "Deployment Tools"). It is a single ~2 MB binary; install the ADK feature or copy just `oscdimg.exe` to the build host and pass `-OscdimgPath`. The script auto-detects it on PATH and in the default ADK location.
@@ -242,7 +242,7 @@ Connects to each node over **WinRM** with an explicit local admin credential (AD
 
 ### Validation (default, read-only)
 
-- Physical adapter **names** match `lab-config.psd1` — the exact names Stage 5's ARM targets: `Integrated NIC1 Port 1-1` / `Port 2-1` (mgmt/compute, QLogic QL41232) and `SLOT 2 Port 1` / `Port 2` (storage, QLogic QL41262).
+- Physical adapter **names** match `lab-config.psd1` — the exact names Stage 5's ARM targets: `Integrated NIC 1 Port 1-1` / `Port 2-1` (mgmt/compute, QLogic QL41232) and `SLOT 2 Port 1` / `Port 2` (storage, QLogic QL41262).
 - Link state and speed (storage adapters Up @ 25 Gbps, media connected = back-to-back cable present).
 - Storage adapters **RDMA-capable** (iWARP); RDMA not yet *enabled* pre-deploy is expected — Stage 5 enables it.
 - **No pre-existing SET team / storage vNICs** that would conflict with the cloud deployment.
@@ -317,17 +317,42 @@ Prerequisites before running Register: Stage 3 green, **Secure Boot re-enabled**
 
 ## Stage 5 — Azure Local deployment (`05-deploy-azure-local.ps1`)
 
-ARM validation by default. Deployment requires `-EnableDeployment` and a typed `DEPLOY` confirmation after `what-if`.
+This is the stage that actually builds the cluster — SET switch, storage vNICs, RDMA/iWARP, storage auto-IP, Storage Spaces Direct, the failover cluster, and the Azure Local instance — all driven by the ARM template's `intentList` / `storageNetworkList`. It uses **Az PowerShell** (reusing the Stage 4 login on the jump host; no separate Azure CLI dependency).
+
+Flow: validate tooling + files → establish Azure context → **pre-flight gates** → inject secrets at runtime → Validate (default) or What-If + typed `DEPLOY` + deploy.
+
+Pre-flight gates (read-only; deployment is refused unless they pass):
+- resource group exists (Stage 4 creates it),
+- both Arc nodes exist and report `Status=Connected`,
+- `arcNodeResourceIds` in the parameter file resolve to those machines,
+- management adapter names in `intentList` match `lab-config.psd1` (the exact Windows names, e.g. `Integrated NIC 1 Port 1-1` — note the space),
+- secrets are being injected at runtime, not read from the committed file.
+
+Validate (non-mutating):
 
 ```powershell
 .\bootstrap-cluster.ps1 -Stage 05-deploy-azure-local `
-  -SubscriptionId <sub-id> -TenantId <tenant-id> `
+  -SubscriptionId <sub-id> -TenantId <tenant-id> -Region southeastasia `
   -TemplateFile ..\arm-templates\azuredeploy.json `
-  -ParameterFile ..\arm-templates\azure-local.parameters.json
+  -ParameterFile ..\arm-templates\ODIN-parameters.json -UseExistingAzLogin
 ```
 
+Deploy (gated):
+
+```powershell
+.\bootstrap-cluster.ps1 -Stage 05-deploy-azure-local -DeploymentMode Deploy -EnableDeployment `
+  -SubscriptionId <sub-id> -TenantId <tenant-id> -Region southeastasia `
+  -TemplateFile ..\arm-templates\azuredeploy.json `
+  -ParameterFile ..\arm-templates\ODIN-parameters.json -UseExistingAzLogin
+```
+
+Secrets: the stage prompts for the local admin password (account `Administrator` by default from `lab-config.psd1`) and injects `localAdminUserName` / `localAdminPassword` as runtime override parameters — the committed parameter file keeps placeholders. Never commit the real password.
+
+> [!IMPORTANT]
+> Before Deploy: Stages 2-4 green, both nodes **Arc-Connected**, **Secure Boot re-enabled**, no pending reboot, and the 25GbE storage DACs linked. The management adapter names in the ARM parameters were corrected to include the space (`Integrated NIC 1 Port 1-1`); a name mismatch fails the deployment when Network ATC cannot find the adapter. Verify `hciResourceProviderObjectID` matches your tenant.
+
 > [!TIP]
-> Two-node deployment requires a dedicated Cloud Witness storage account; use one Key Vault per cluster. Deploy once via the portal first, then standardize the ARM template.
+> Two-node deployment requires a dedicated Cloud Witness storage account; use one Key Vault per cluster. The cloud deployment runs 1-3 hours — track it in the portal (Azure Local instance) or `Get-AzResourceGroupDeployment`. `-SkipArcCheck` exists only for re-runs after the Arc gate has already been confirmed.
 
 ## Stage 6 — Cluster validation (`06-validate-cluster.ps1`)
 

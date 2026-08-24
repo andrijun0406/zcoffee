@@ -51,7 +51,7 @@
     "networkingPattern": { "value": "convergedManagementCompute" },
     "intentList": { "value": [
       { "name": "MgmtCompute", "trafficType": ["Management","Compute"],
-        "adapter": ["Integrated NIC1 Port 1-1","Integrated NIC1 Port 2-1"],
+        "adapter": ["Integrated NIC 1 Port 1-1","Integrated NIC 1 Port 2-1"],
         "adapterPropertyOverrides": { "jumboPacket": "1514", "networkDirect": "Disabled", "networkDirectTechnology": "" } },
       { "name": "Storage", "trafficType": ["Storage"],
         "adapter": ["SLOT 2 Port 1","SLOT 2 Port 2"],

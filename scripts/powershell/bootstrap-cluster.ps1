@@ -54,6 +54,9 @@ param(
     [string]$ParameterFile,
     [string]$DeploymentName,
     [switch]$EnableDeployment,
+    [ValidateSet('Validate','Deploy')]
+    [string]$DeploymentMode,
+    [switch]$SkipArcCheck,
     [string]$ClusterName,
 
     # Hardware prep (Stage 01 only)
