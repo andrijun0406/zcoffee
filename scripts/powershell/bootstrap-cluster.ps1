@@ -27,6 +27,19 @@ param(
     [string]$DnsServer,
     [switch]$Apply,
 
+    # Stage 2 (host network readiness validation)
+    [string[]]$NodeIPs,
+    [string]$LocalAdminUser,
+    [SecureString]$LocalAdminPassword,
+    [ValidateSet('HTTPS','HTTP')]
+    [string]$Transport,
+    [int]$Port,
+    [switch]$ConfigureTrustedHosts,
+    [switch]$SkipCertCheck,
+    [switch]$ApplyVlanTag,
+    [switch]$RebootIfRenamed,
+    [switch]$ForceIpChange,
+
     [ValidateSet('Validate','Register')]
     [string]$ArcMode = 'Validate',
     [string]$SubscriptionId,
