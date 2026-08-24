@@ -33,7 +33,10 @@ param(
     [string]$Organization = 'zcoffee',
     [switch]$AutoSelectBootDisk,
     [string]$BootDiskModelMatch = '(?i)boss',
-    [int]$BootDiskMaxSizeGB = 0
+    [int]$BootDiskMaxSizeGB = 0,
+    [switch]$AsIso,
+    [string]$OutputIso   = (Join-Path $PSScriptRoot 'autounattend.iso'),
+    [string]$OscdimgPath
 )
 
 Set-StrictMode -Version Latest
@@ -195,3 +198,37 @@ catch { throw "Generated XML is not well-formed: $($_.Exception.Message)" }
 Set-Content -Path $OutputXml -Value $xml -Encoding UTF8
 Write-Host ("Autounattend.xml written to: {0}" -f (Resolve-Path $OutputXml).Path) -ForegroundColor Green
 Write-Host 'Treat this file as a secret (it contains the obfuscated admin password).' -ForegroundColor Yellow
+
+if ($AsIso) {
+    # Resolve oscdimg (Server Core has no IMAPI2; oscdimg is the reliable path).
+    $oscdimg = $OscdimgPath
+    if (-not $oscdimg) {
+        $cmd = Get-Command oscdimg.exe -ErrorAction SilentlyContinue
+        if ($cmd) { $oscdimg = $cmd.Source }
+    }
+    if (-not $oscdimg) {
+        $default = 'C:\Program Files (x86)\Windows Kits\10\Assessment and Deployment Kit\Deployment Tools\amd64\Oscdimg\oscdimg.exe'
+        if (Test-Path $default) { $oscdimg = $default }
+    }
+    if (-not $oscdimg -or -not (Test-Path $oscdimg)) {
+        throw "oscdimg.exe not found. Install the Windows ADK Deployment Tools or pass -OscdimgPath. (Do NOT use make-autounattend-iso.ps1 on Server Core; its IMAPI2 COM is not registered.)"
+    }
+    Write-Host ("Using oscdimg: {0}" -f $oscdimg) -ForegroundColor Cyan
+
+    # Stage the single Autounattend.xml at the root of a temp folder and pack a small data ISO.
+    $stage = Join-Path ([IO.Path]::GetTempPath()) ("ua_iso_" + [Guid]::NewGuid().ToString('N'))
+    New-Item -ItemType Directory -Path $stage -Force | Out-Null
+    try {
+        Copy-Item -LiteralPath (Resolve-Path $OutputXml).Path -Destination (Join-Path $stage 'Autounattend.xml') -Force
+        $isoDir = Split-Path -Path $OutputIso -Parent
+        if ($isoDir -and -not (Test-Path $isoDir)) { New-Item -ItemType Directory -Path $isoDir -Force | Out-Null }
+        # -u2 = UDF; -l sets a volume label. No boot image (this is a data ISO read by Setup, not booted).
+        & $oscdimg '-u2' '-udfver102' '-lUNATTEND' $stage $OutputIso
+        if ($LASTEXITCODE -ne 0) { throw "oscdimg failed (exit $LASTEXITCODE)." }
+        Write-Host ("Autounattend ISO written to: {0}" -f (Resolve-Path $OutputIso).Path) -ForegroundColor Green
+        Write-Host 'Mount it to a node ALREADY booted into Setup via: racadm ... remoteimage2 -c -l http://<server>:<port>/autounattend.iso' -ForegroundColor Yellow
+    }
+    finally {
+        Remove-Item -Path $stage -Recurse -Force -ErrorAction SilentlyContinue
+    }
+}
