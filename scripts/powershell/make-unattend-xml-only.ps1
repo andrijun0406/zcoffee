@@ -21,7 +21,7 @@
 
 .NOTES
     Admin password is stored as base64 unattend obfuscation (NOT encryption). Treat the output
-    Autounattend.xml as a secret. Tested on Windows 11 22H2 and Windows Server 2022.
+    Autounattend.xml as a secret.
 #>
 [CmdletBinding()]
 param(
