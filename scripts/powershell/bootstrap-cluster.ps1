@@ -36,6 +36,8 @@ param(
     [int]$Port,
     [switch]$ConfigureTrustedHosts,
     [switch]$SkipCertCheck,
+    [switch]$SkipEnvChecker,
+    [switch]$ConnectivityOnly,
     [switch]$ApplyVlanTag,
     [switch]$RebootIfRenamed,
     [switch]$ForceIpChange,
