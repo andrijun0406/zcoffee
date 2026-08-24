@@ -15,7 +15,7 @@ This guide maps the six-stage automation to the Dell AX System for Azure Local (
 - [Tooling prerequisites](#tooling-prerequisites)
 - [Running from a jump host (VPN / Server Core)](#running-from-a-jump-host-vpn--server-core)
 - [Stage 1 — OS deployment](#stage-1--os-deployment-01-deploy-osps1)
-- [Stage 2 — Host networking](#stage-2--host-networking-02-configure-networkps1)
+- [Stage 2 — Host network readiness + base management config](#stage-2--host-network-readiness--base-management-config-02-configure-networkps1)
 - [Stage 3 — Node preparation](#stage-3--node-preparation-03-prepare-nodeps1)
 - [Stage 4 — Azure Arc registration](#stage-4--azure-arc-registration-04-register-arcps1)
 - [Stage 5 — Azure Local deployment](#stage-5--azure-local-deployment-05-deploy-azure-localps1)
@@ -234,19 +234,58 @@ cd C:\zcoffee\scripts\powershell
   -ISOFile ..\..\isos\AzureLocal-unattend.iso -StartInstallation -NoCertWarn
 ```
 
-## Stage 2 — Host networking (`02-configure-network.ps1`)
+## Stage 2 — Host network readiness + base management config (`02-configure-network.ps1`)
 
-Defines management VLAN 230 and storage VLANs 711/712. Currently a guarded placeholder; `-Apply` intentionally stops until exact OS adapter names and Network ATC intents are confirmed.
+Two roles. On a switchless 2-node deployment the SET switch, storage vNICs, RDMA/iWARP, and storage auto-IP are created by the Azure Local **cloud deployment in Stage 5** (ARM `intentList` / `storageNetworkList`) — creating those here would collide with it. So Stage 2 **validates readiness** for the intents Stage 5 will build, and can optionally **apply/repair the base management config** on the physical management port so the nodes are reachable and can reach Azure for Arc registration.
 
-- Management/Compute intent on Integrated NIC1 Port 1-1 and Port 2-1 (QLogic QL41232 2x25GbE rNDC).
-- Storage intent on SLOT 2 Port 1 and Port 2 (QLogic QL41262 2x25GbE); RDMA/iWARP; storage auto-IP (`10.71.0.0/16`).
-- Let Network ATC own host networking; avoid manual SET teams or storage vNICs.
+Connects to each node over **WinRM** with an explicit local admin credential (AD-less / Local Identity).
+
+### Validation (default, read-only)
+
+- Physical adapter **names** match `lab-config.psd1` — the exact names Stage 5's ARM targets: `Integrated NIC1 Port 1-1` / `Port 2-1` (mgmt/compute, QLogic QL41232) and `SLOT 2 Port 1` / `Port 2` (storage, QLogic QL41262).
+- Link state and speed (storage adapters Up @ 25 Gbps, media connected = back-to-back cable present).
+- Storage adapters **RDMA-capable** (iWARP); RDMA not yet *enabled* pre-deploy is expected — Stage 5 enables it.
+- **No pre-existing SET team / storage vNICs** that would conflict with the cloud deployment.
+- Hostname and management IP match the config; required roles (Hyper-V, Failover-Clustering, DCB) noted.
+
+```powershell
+# From the jump host. AD-less: uses a local admin credential + WinRM.
+.\bootstrap-cluster.ps1 -Stage 02-configure-network -ConfigureTrustedHosts -Transport HTTP
+# HTTPS (if an HTTPS WinRM listener exists on the nodes):
+.\bootstrap-cluster.ps1 -Stage 02-configure-network -ConfigureTrustedHosts -Transport HTTPS -SkipCertCheck
+```
+
+- `-ConfigureTrustedHosts` adds the node IPs to this host's WinRM TrustedHosts (the only local mutation) and tests connectivity first.
+- `-Transport HTTP` uses 5985 (works AD-less with Negotiate + TrustedHosts). `-Transport HTTPS` uses 5986 and needs an HTTPS listener on the nodes; add `-SkipCertCheck` for a self-signed listener cert.
+- Resolve any FAIL (missing adapter name, storage cable down) before Stage 5; WARN items (RDMA not yet enabled, features not yet installed) are expected pre-deploy.
+
+### Base management config (`-Apply`, gated)
+
+This is **temporary** bootstrap config on the physical management port. It sets base reachability so Arc/Stage 5 can run; Stage 5's Network ATC then builds the SET team and **migrates the management IP onto a `vManagement` vNIC**. So we deliberately set the IP on a single physical port here — not a manually-built team — to avoid colliding with the SET team the cloud deployment creates.
+
+Ordered to be **connectivity-safe** over WinRM (nothing that would silently drop the session unless you force it):
+
+1. **DNS** → set to `10.8.230.51` (safe).
+2. **Hostname** → `Rename-Computer` to `azljkt01n1` / `azljkt01n2` if mismatched (needs a reboot; `-RebootIfRenamed` reboots automatically).
+3. **Static IP / gateway** → idempotent. If the node already sits at its target IP, it just ensures static + prefix + gateway (no address change, no drop). If the current IP differs from the target, it **refuses** over WinRM (would drop the session) unless `-ForceIpChange`.
+4. **VLAN 230 tag** → always **reported**; only changed with `-ApplyVlanTag` (risky — can drop the session; prefer the iDRAC console for VLAN changes).
+
+```powershell
+# Verify + repair hostname/DNS/static-IP on the running nodes (safe, idempotent)
+.\bootstrap-cluster.ps1 -Stage 02-configure-network -ConfigureTrustedHosts -Transport HTTP -Apply -RebootIfRenamed
+```
+
+> [!CAUTION]
+> VLAN 230 on this DC is **tagged** (the switch ports are trunked, VLAN 230 is not native — confirmed with the datacenter admin). If the OS is not tagging on the physical adapter, that tag lives at the switch today. Changing the host-side `VLAN ID` advanced property (`-ApplyVlanTag`) can drop the WinRM session — do VLAN changes from the iDRAC console. Confirm the required tagging model with your DC admin for any new environment.
+
+> [!NOTE]
+> For clean redeploys the same hostname + static IP can also be baked into the golden ISO's answer file (per-node, keyed on service tag). That path depends on the exact Windows adapter names on the installed nodes — run Stage 2 validation first to capture the real `Get-NetAdapter` names, then bake them in. Until then, `-Apply` on the already-running nodes is the reliable route.
 
 ## Stage 3 — Node preparation (`03-prepare-node.ps1`)
 
 Guarded placeholder for hostname, DNS A records, the dedicated non-built-in local admin, security baseline, firmware/SBE readiness, and environment validation.
 
-- Static management IPs: `azljkt01n1` → `10.8.230.71`, `azljkt01n2` → `10.8.230.72`.
+- Static management IPs: `azljkt01n1` → `10.8.230.232`, `azljkt01n2` → `10.8.230.235`.
 - DNS forwarder: **`10.8.230.51`** (from `lab-config.psd1`).
 - Security baseline: BitLocker (boot + data), Credential Guard, WDAC, SMB signing, drift control.
 

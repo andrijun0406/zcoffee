@@ -48,7 +48,7 @@
 
     # Nodes (HostIP from ODIN report; iDRAC = out-of-band mgmt, not in ODIN report)
     Nodes = @(
-        @{ Name = 'azljkt01n1'; HostIP = '10.8.230.71'; iDRAC = '10.8.230.84'; ServiceTag = 'JF7C7J3' }
-        @{ Name = 'azljkt01n2'; HostIP = '10.8.230.72'; iDRAC = '10.8.230.86'; ServiceTag = '1G7C7J3' }
+        @{ Name = 'azljkt01n1'; HostIP = '10.8.230.232'; iDRAC = '10.8.230.84'; ServiceTag = 'JF7C7J3' }
+        @{ Name = 'azljkt01n2'; HostIP = '10.8.230.235'; iDRAC = '10.8.230.86'; ServiceTag = '1G7C7J3' }
     )
 }

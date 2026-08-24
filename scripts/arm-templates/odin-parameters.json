@@ -44,8 +44,8 @@
     "dnsServerConfig": { "value": "UseForwarder" },
     "dnsZones": { "value": [ { "dnsZoneName": "zcoffee.com", "dnsForwarder": [ "10.8.230.51" ] } ] },
     "physicalNodesSettings": { "value": [
-      { "name": "azljkt01n1", "ipv4Address": "10.8.230.71" },
-      { "name": "azljkt01n2", "ipv4Address": "10.8.230.72" }
+      { "name": "azljkt01n1", "ipv4Address": "10.8.230.232" },
+      { "name": "azljkt01n2", "ipv4Address": "10.8.230.235" }
     ] },
     "networkingType": { "value": "switchlessMultiServerDeployment" },
     "networkingPattern": { "value": "convergedManagementCompute" },

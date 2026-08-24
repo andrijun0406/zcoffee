@@ -132,11 +132,11 @@
       "value": [
         {
           "name": "azljkt01n1",
-          "ipv4Address": "10.8.230.71"
+          "ipv4Address": "10.8.230.232"
         },
         {
           "name": "azljkt01n2",
-          "ipv4Address": "10.8.230.72"
+          "ipv4Address": "10.8.230.235"
         }
       ]
     },

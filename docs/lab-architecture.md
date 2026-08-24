@@ -53,8 +53,8 @@ Do not overlap `10.96.0.0/12` or `10.244.0.0/16` (reserved for AKS Arc / Arc Res
 ## Node and iDRAC addressing
 | Node | Host name | Host IP | iDRAC IP | Service Tag |
 |------|-----------|---------|----------|-------------|
-| 1 | azljkt01n1 | `10.8.230.71` | `10.8.230.84` | JF7C7J3 |
-| 2 | azljkt01n2 | `10.8.230.72` | `10.8.230.86` | 1G7C7J3 |
+| 1 | azljkt01n1 | `10.8.230.232` | `10.8.230.84` | JF7C7J3 |
+| 2 | azljkt01n2 | `10.8.230.235` | `10.8.230.86` | 1G7C7J3 |
 
 ## DNS & naming convention
 
