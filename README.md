@@ -27,6 +27,7 @@ zcoffee/
 │   │   ├── prepare-hardware.ps1       # firmware check/update + BOSS boot VD recreate
 │   │   ├── make-golden-with-unattend.ps1 # slipstreams Autounattend.xml INTO the golden ISO via oscdimg (single RFS)
 │   │   ├── make-autounattend-iso.ps1  # DEPRECATED (separate RFS2 ISO; breaks boot on this firmware)
+│   │   ├── make-unattend-xml-only.ps1  # emits ONLY Autounattend.xml for fast live validation (setup.exe /unattend:)
 │   │   ├── serve-iso.ps1              # native PowerShell ISO HTTP server (no Python)
 │   │   ├── 01-deploy-os.ps1
 │   │   ├── 02-configure-network.ps1

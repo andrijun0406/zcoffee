@@ -15,8 +15,9 @@ version, the Sangfor VPN, and the HTTP server one by one, the confirmed root cau
 > RFS1 from enumerating as a bootable UEFI device on R650 BIOS 1.12.1.**
 
 The durable fix: **single RFS mount**, with the answer file **slipstreamed into the golden
-ISO** (`make-golden-with-unattend.ps1`, via oscdimg), and **automatic BOSS disk selection**
-baked into the answer file. Everything else below is the path that led there.
+ISO** (`make-golden-with-unattend.ps1`, via oscdimg). Disk selection is **interactive by default**
+(pick the ~223 GB BOSS volume); automatic BOSS selection is experimental/opt-in. Everything else
+below is the path that led there.
 
 ## Timeline of problems and fixes
 
@@ -103,15 +104,36 @@ baked into the answer file. Everything else below is the path that led there.
   (`efisys_noprompt.bin`). Also fixed a robocopy argument-quoting bug (`I:\"` → exit 16) and
   switched `/MIR` → `/E` for read-only source media.
 
-### 11. Automatic disk selection (final polish)
+### 11. Automatic disk selection — attempted, then reverted to opt-in
 - **Goal:** remove the last manual step (picking the BOSS volume), portably across PowerEdge
   models where BOSS capacity differs (R650 BOSS-S2 223 GB vs R670 BOSS-N1 960 GB).
-- **Fix:** the answer file now runs a WinPE `RunSynchronous` step that detects the BOSS RAID-1 VD
-  by **controller identity** (a `BOSS` friendly name), `diskpart`-cleans it, creates the UEFI/GPT
-  layout, and installs via `InstallToAvailablePartition`. **No BOSS size is configured** — it is
-  discovered at deploy time. A safety guard halts before touching any disk if detection is
-  ambiguous (0 or >1 match), so it can never wipe an S2D data disk. Opt out with
-  `-InteractiveDiskSelect`.
+- **Approach:** a WinPE `RunSynchronous` step detects the BOSS RAID-1 VD by **controller identity**
+  (a `BOSS` friendly name — model-agnostic, no size configured), `diskpart`-cleans it, creates the
+  UEFI/GPT layout, and installs via `InstallToAvailablePartition`. A safety guard halts before
+  touching any disk if detection is ambiguous (0 or >1 match), so it can never wipe an S2D disk.
+- **Made it the default at first — that was wrong (see step 12).** It is now EXPERIMENTAL and
+  **opt-in via `-AutoSelectBootDisk`; INTERACTIVE is the default** (the proven .84 path).
+
+### 12. Answer file rejected on .86 — XML element order (CONFIRMED)
+- **Symptom:** node .86 booted the golden ISO fine, Azure Stack HCI Setup started, then failed
+  **`0x80070001 - 0x4003x`**. From Shift+F10: **no `C:\Windows\Panther\unattend.xml`** and
+  **no `bootdisk-select.log`**.
+- **Cause:** the auto-select rebuild emitted an `Autounattend.xml` with the `windowsPE`
+  `Microsoft-Windows-Setup` child elements **out of schema order**. The sequence must be
+  `ImageInstall -> RunSynchronous -> UserData`; it was assembled as `RunSynchronous -> ImageInstall
+  -> UserData`. An out-of-order element makes Setup **reject the entire answer file** — so nothing
+  applied (no Panther copy) and the `RunSynchronous` disk step never ran (no log), producing the
+  apply-phase error. Node .84 was unaffected because its earlier ISO had only `<UserData>` (a valid
+  single-element sequence).
+- **Fix:** corrected the element order in `make-golden-with-unattend.ps1`, reverted the default to
+  interactive, and added `make-unattend-xml-only.ps1` so the answer file can be validated LIVE via
+  `setup.exe /unattend:<path>` (fast) before committing to an ~8 GB ISO rebuild.
+- **Lesson:** validate answer-file XML with the `/unattend:` loop, not by rebuilding the ISO each time.
+
+### Aside: stale "Virtual Network File 2" boot entry
+- After the earlier RFS2 experiments, an orphaned **Virtual Network File 2** boot variable can
+  persist in UEFI NVRAM and take boot priority even after the device is detached. Remove it via
+  Boot Manager → **Delete Boot Option**, or set a persistent VCD boot with `-UseUefiBootOrder`.
 
 ## What was ruled out (so we don't retry it)
 
@@ -123,11 +145,14 @@ baked into the answer file. Everything else below is the path that led there.
 | Single-threaded HTTP server | **Real improvement, not the root cause** — multi-threaded server still failed with RFS2 mounted |
 | Firmware/driver mismatch | Not the boot cause; the SBE handles the validated baseline during Stage 5 |
 | **Second RFS image (RFS2) mounted** | **CONFIRMED root cause** — detaching it fixed the boot |
+| **Auto disk-select answer file (`0x4003x`)** | **CONFIRMED** — XML element order (`ImageInstall`→`RunSynchronous`→`UserData`) was wrong; Setup rejected the whole file. Fixed; auto-select is now opt-in |
 
 ## The proven, repeatable Stage 1 path
 
 ```powershell
-# 1. Build the unattended golden ISO once (oscdimg; single bootable image, auto BOSS select)
+# 1. Build the unattended golden ISO once (oscdimg; single bootable image).
+#    Disk selection is INTERACTIVE by default (pick ~223 GB BOSS). Add -AutoSelectBootDisk only
+#    after validating the answer file live with make-unattend-xml-only.ps1 + setup.exe /unattend:.
 .\make-golden-with-unattend.ps1 -OscdimgPath C:\Tools\oscdimg\oscdimg.exe `
   -GoldenIso ..\..\isos\AzureLocal24H2.<...>_A01.en-us.iso `
   -OutputIso ..\..\isos\AzureLocal-unattend.iso

@@ -22,12 +22,12 @@
       - oscdimg repacks staging -> new ISO with UDF + BIOS(etfsboot.com) + UEFI(efisys*.bin) boot.
         Prefers efisys_noprompt.bin (removes the "Press any key to boot" gate for hands-off install).
 
-    Answer-file scope: locale, timezone, admin password, and (by default) AUTOMATIC BOSS
-    boot-disk selection + partitioning in WinPE. Auto-selection finds the BOSS RAID-1 VD by its
-    controller identity (a 'BOSS' friendly name), so it is model-agnostic - no disk size needs to
-    be configured (works for R650 BOSS-S2 223 GB, R670 BOSS-N1 960 GB, etc.). If detection is
-    ambiguous it stops safely instead of risking a wrong-disk install. Use -InteractiveDiskSelect
-    to opt out and pause at the disk screen instead.
+    Answer-file scope: locale, timezone, admin password. Disk selection is INTERACTIVE by default -
+    Setup runs hands-off until the disk screen, where the operator picks the BOSS RAID-1 'OS' volume
+    (~223 GB). This is the proven path. -AutoSelectBootDisk enables an EXPERIMENTAL WinPE step that
+    auto-detects the BOSS VD by controller identity ('BOSS' friendly name, model-agnostic) and
+    partitions it via diskpart; it is NOT yet validated on the Azure Local golden image and must be
+    tested on a scratch node before use.
 
 .REQUIREMENTS
     oscdimg.exe must be available. It ships with the Windows ADK "Deployment Tools" feature:
@@ -63,7 +63,7 @@ param(
     # hands-off. Detection is by the BOSS controller's IDENTITY (its RAID-1 VD enumerates with a
     # 'BOSS' friendly name) - model-agnostic, so it works whether BOSS is 223 GB (R650 BOSS-S2),
     # 960 GB (R670 BOSS-N1), or any other size. No per-model size needs to be configured.
-    [switch]$InteractiveDiskSelect,              # opt OUT of auto-select; pause at the disk screen instead
+    [switch]$AutoSelectBootDisk,                 # opt IN to EXPERIMENTAL WinPE auto BOSS selection (default: interactive)
     [string]$BootDiskModelMatch = '(?i)boss',    # regex matched against disk FriendlyName/Model to find BOSS
     [int]$BootDiskMaxSizeGB = 0                   # optional ceiling for the size-based FALLBACK only (0 = none)
 )
@@ -158,7 +158,7 @@ $plain = $null
 # instead of risking a wrong-disk install onto an S2D data disk.
 $diskSetupXml = ''
 $imageInstallXml = ''
-if (-not $InteractiveDiskSelect) {
+if ($AutoSelectBootDisk) {
     $ceiling = [int]$BootDiskMaxSizeGB
     $rx = $BootDiskModelMatch
     # PowerShell that runs INSIDE WinPE during Windows Setup (windowsPE pass).
@@ -217,7 +217,8 @@ try {
         </OSImage>
       </ImageInstall>
 "@
-    Write-Step "Disk selection: AUTOMATIC (BOSS by identity /$rx/, diskpart partitioning in WinPE)." 'Green'
+    Write-Step "Disk selection: AUTOMATIC (EXPERIMENTAL, unvalidated). BOSS by identity /$rx/, diskpart in WinPE." 'Yellow'
+    Write-Step "  If Setup errors at the apply phase or ignores the answer file, rebuild WITHOUT -AutoSelectBootDisk and pick BOSS manually." 'Yellow'
 } else {
     Write-Step "Disk selection: INTERACTIVE (Setup will pause at the disk screen)." 'Yellow'
 }
@@ -240,12 +241,11 @@ $xml = @"
     <component name="Microsoft-Windows-Setup"
                processorArchitecture="amd64"
                publicKeyToken="31bf3856ad364e35" language="neutral" versionScope="nonSxS">
-      <UserData>
+$imageInstallXml$diskSetupXml      <UserData>
         <AcceptEula>true</AcceptEula>
         <FullName>$OwnerName</FullName>
         <Organization>$Organization</Organization>
       </UserData>
-$diskSetupXml$imageInstallXml
     </component>
   </settings>
   <settings pass="oobeSystem">
@@ -380,7 +380,7 @@ try {
     Write-Host "Created unattended golden ISO: $OutputIso ($sizeGbOut GB)" -ForegroundColor Green
     Write-Host "Locale: $Locale   TimeZone: $TimeZone" -ForegroundColor Cyan
     Write-Host "Boot: $(if($biosRel){'BIOS + UEFI'}else{'UEFI'}) El Torito (single RFS mount, no RFS2 needed)." -ForegroundColor Cyan
-    Write-Host "Disk: $(if($InteractiveDiskSelect){'INTERACTIVE (operator picks BOSS at the disk screen)'}else{'AUTOMATIC (BOSS auto-selected + partitioned in WinPE)'})." -ForegroundColor Cyan
+    Write-Host "Disk: $(if($AutoSelectBootDisk){'AUTOMATIC (experimental WinPE BOSS auto-select)'}else{'INTERACTIVE (operator picks BOSS at the disk screen)'})." -ForegroundColor Cyan
     Write-Host "Treat this ISO as a secret (it contains the obfuscated admin password); it is gitignored." -ForegroundColor Yellow
     Write-Host ""
     Write-Host "Deploy with a SINGLE RFS mount:" -ForegroundColor Cyan
