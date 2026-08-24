@@ -126,7 +126,27 @@ else {
 }
 
 # Drop parameters not accepted by the target stage to avoid binding errors.
-$stageParams = (Get-Command $stageScript).Parameters.Keys
+# Resolve the stage script's parameter names. Get-Command.Parameters can be $null
+# in some contexts (under StrictMode that then throws on .Keys), so fall back to
+# parsing the param() block via the PowerShell AST.
+$stageParams = $null
+try {
+    $cmdInfo = Get-Command $stageScript -ErrorAction Stop
+    if ($cmdInfo.Parameters) { $stageParams = @($cmdInfo.Parameters.Keys) }
+} catch { $stageParams = $null }
+
+if (-not $stageParams) {
+    $tokens = $null; $errors = $null
+    $ast = [System.Management.Automation.Language.Parser]::ParseFile($stageScript, [ref]$tokens, [ref]$errors)
+    $paramBlock = $ast.ParamBlock
+    if (-not $paramBlock -and $ast.EndBlock) { $paramBlock = $ast.EndBlock.Statements | Where-Object { $_ -is [System.Management.Automation.Language.ParamBlockAst] } | Select-Object -First 1 }
+    if ($paramBlock) {
+        $stageParams = @($paramBlock.Parameters | ForEach-Object { $_.Name.VariablePath.UserPath })
+    } else {
+        $stageParams = @()
+    }
+}
+
 $clean = @{}
 foreach ($k in $forward.Keys) {
     if ($stageParams -contains $k) { $clean[$k] = $forward[$k] }
