@@ -57,7 +57,7 @@ if (-not $LocalAdminUser) { $LocalAdminUser = 'LabAdmin' }
 
 if (-not $b.ContainsKey('NodeIPs')) {
     if ($cfg.ContainsKey('Nodes')) { $NodeIPs = @($cfg.Nodes | ForEach-Object { $_.HostIP }) }
-    else { $NodeIPs = @('10.8.230.232','10.8.230.235') }
+    else { $NodeIPs = @('10.8.230.71','10.8.230.72') }
 }
 
 if (-not $Port) { $Port = if ($Transport -eq 'HTTPS') { 5986 } else { 5985 } }
@@ -221,13 +221,25 @@ try {
                 Write-Info 'HTTPS/SSL uses certificate trust; TrustedHosts is not strictly required. Adding anyway for Negotiate fallback.'
             }
             $current = (Get-Item WSMan:\localhost\Client\TrustedHosts -ErrorAction SilentlyContinue).Value
-            $wanted  = $script:NodeIPs
-            $set     = @()
-            if ($current) { $set += ($current -split ',') }
-            $set += $wanted
-            $final = ($set | Where-Object { $_ } | Select-Object -Unique) -join ','
-            Set-Item WSMan:\localhost\Client\TrustedHosts -Value $final -Force
-            Write-Ok "TrustedHosts set to: $final"
+            $curList = @()
+            if ($current) { $curList = @($current -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ }) }
+
+            if ($curList -contains '*') {
+                # WinRM rejects '*' combined with any other pattern; '*' alone already trusts the nodes.
+                Write-Ok "TrustedHosts already '*' (trust all) - leaving unchanged; nodes are covered."
+            }
+            elseif ($script:NodeIPs -contains '*') {
+                Set-Item WSMan:\localhost\Client\TrustedHosts -Value '*' -Force
+                Write-Ok "TrustedHosts set to: *"
+            }
+            else {
+                $set = @()
+                $set += $curList
+                $set += $script:NodeIPs
+                $final = ($set | Where-Object { $_ -and $_ -ne '*' } | Select-Object -Unique) -join ','
+                Set-Item WSMan:\localhost\Client\TrustedHosts -Value $final -Force
+                Write-Ok "TrustedHosts set to: $final"
+            }
         }
         else {
             Write-Info 'TrustedHosts not modified (pass -ConfigureTrustedHosts to add node IPs).'
