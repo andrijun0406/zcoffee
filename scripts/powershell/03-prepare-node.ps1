@@ -281,7 +281,7 @@ try {
                     $ar = Invoke-Command @connArgs -ScriptBlock $remoteApply -ArgumentList @($script:azureEndpoints, (-not $script:SkipEnvChecker))
                     foreach ($a in $ar.Actions)  { Write-Ok  $a }
                     foreach ($w in $ar.Warnings) { Write-Warn $w }
-                } catch { Write-Warn "Apply on $ip: $($_.Exception.Message)" }
+                } catch { Write-Warn "Apply on ${ip}: $($_.Exception.Message)" }
             }
 
             $res = Invoke-Command @connArgs -ScriptBlock $remoteCheck -ArgumentList @(
