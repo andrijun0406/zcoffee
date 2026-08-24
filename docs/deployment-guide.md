@@ -294,7 +294,26 @@ Guarded placeholder for hostname, DNS A records, the dedicated non-built-in loca
 
 ## Stage 4 — Azure Arc registration (`04-register-arc.ps1`)
 
-Validate-first placeholder for Azure context, resource providers, RBAC, Arc registration, post-reboot health, and Dell SBE applicability. Use the release-matched Arc initialization procedure when implemented.
+Registers both nodes as Arc-enabled servers so the Stage 5 ARM template can target their `arcNodeResourceIds`. Validation-first (like Stages 2/3): Validate mode is read-only; Register mode (`-Apply`) performs the onboarding.
+
+Flow: sign in to Azure on the jump host (device code) → register/verify the required resource providers → ensure the resource group + acquire ARM/Graph tokens → per node over WinRM, ensure `AzsHci.ARCInstaller` + Az modules and run `Invoke-AzStackHciArcInitialization` with the passed tokens (no interactive auth on the node) → verify each node shows `Status=Connected` and capture its resource id.
+
+```powershell
+# Read-only prerequisite check (no onboarding)
+.\bootstrap-cluster.ps1 -Stage 04-register-arc -ArcMode Validate `
+  -SubscriptionId <sub-id> -TenantId <tenant-id> -Region southeastasia `
+  -ConfigureTrustedHosts -Transport HTTP
+
+# Perform registration on both nodes
+.\bootstrap-cluster.ps1 -Stage 04-register-arc -ArcMode Register -Apply `
+  -SubscriptionId <sub-id> -TenantId <tenant-id> -Region southeastasia `
+  -ConfigureTrustedHosts -Transport HTTP
+```
+
+Prerequisites before running Register: Stage 3 green, **Secure Boot re-enabled**, no pending reboot, and outbound HTTPS from each node to the Azure/Arc endpoints. Registration reboots the node when the agent update phase completes; re-runs are idempotent (already-Connected nodes are skipped). Copy the printed resource ids into `arcNodeResourceIds` for Stage 5.
+
+> [!IMPORTANT]
+> Subscription and tenant IDs are never stored in the repo. Pass them as parameters (or fill the private lab-config). The signed-in account needs permission to register providers, create the resource group, and onboard Arc machines.
 
 ## Stage 5 — Azure Local deployment (`05-deploy-azure-local.ps1`)
 

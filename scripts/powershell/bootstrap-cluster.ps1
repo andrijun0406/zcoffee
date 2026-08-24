@@ -44,6 +44,9 @@ param(
 
     [ValidateSet('Validate','Register')]
     [string]$ArcMode = 'Validate',
+    [string]$Region,
+    [string]$Cloud,
+    [switch]$UseExistingAzLogin,
     [string]$SubscriptionId,
     [string]$TenantId,
     [string]$ResourceGroupName,
