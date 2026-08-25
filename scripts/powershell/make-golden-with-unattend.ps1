@@ -65,7 +65,14 @@ param(
     # 960 GB (R670 BOSS-N1), or any other size. No per-model size needs to be configured.
     [switch]$AutoSelectBootDisk,                 # opt IN to EXPERIMENTAL WinPE auto BOSS selection (default: interactive)
     [string]$BootDiskModelMatch = '(?i)boss',    # regex matched against disk FriendlyName/Model to find BOSS
-    [int]$BootDiskMaxSizeGB = 0                   # optional ceiling for the size-based FALLBACK only (0 = none)
+    [int]$BootDiskMaxSizeGB = 0,                  # optional ceiling for the size-based FALLBACK only (0 = none)
+
+    # --- Bake per-node network + remote access into the answer file (specialize pass) ---
+    # Each node self-configures by reading its Dell service tag and matching lab-config.psd1:
+    # sets hostname, VLAN 230 tag, static mgmt IP/GW/DNS, enables WinRM + RDP. This makes a
+    # freshly imaged node reachable from the jump host with no iDRAC-console work.
+    [switch]$BakeNetworkConfig,                  # opt IN to bake hostname + static IP/VLAN + WinRM/RDP
+    [int]$MgmtPrefixLength = 24                  # management subnet prefix length (/24)
 )
 
 Set-StrictMode -Version Latest
@@ -112,6 +119,10 @@ Write-Step "Output ISO:        $OutputIso"
 
 if (-not (Test-Path $GoldenIso -PathType Leaf)) { throw "Golden ISO not found: $GoldenIso" }
 $GoldenIso = (Resolve-Path $GoldenIso).Path
+
+# --- Load lab-config.psd1 (single source of truth) for network bake ---
+$__cfgPath = Join-Path $PSScriptRoot 'config\lab-config.psd1'
+$labCfg = if (Test-Path $__cfgPath) { Import-PowerShellDataFile -Path $__cfgPath } else { @{} }
 
 # --- Resolve oscdimg first, before doing any heavy work ---
 $oscdimg = Resolve-Oscdimg -Hint $OscdimgPath
@@ -223,6 +234,87 @@ try {
     Write-Step "Disk selection: INTERACTIVE (Setup will pause at the disk screen)." 'Yellow'
 }
 
+# --- Build the per-node network bootstrap (specialize pass) or leave empty ---
+# A base64-encoded PowerShell script runs in the specialize pass. It reads the Dell service tag,
+# maps it to hostname + management IP from lab-config.psd1, tags VLAN, sets a static IP/GW/DNS on
+# the management adapter, and enables WinRM + RDP so the node is remotely reachable after install.
+$netSpecializeXml = ''
+if ($BakeNetworkConfig) {
+    $nodes = @()
+    if ($labCfg.ContainsKey('Nodes')) { $nodes = @($labCfg.Nodes) }
+    if (-not $nodes -or $nodes.Count -eq 0) { throw 'BakeNetworkConfig requires Nodes in lab-config.psd1 (ServiceTag + HostIP + Name).' }
+
+    $gw        = if ($labCfg.ContainsKey('Gateway'))     { $labCfg.Gateway }     else { '10.8.230.1' }
+    $dns       = if ($labCfg.ContainsKey('DnsServer'))   { $labCfg.DnsServer }   else { '10.8.230.51' }
+    $vlan      = if ($labCfg.ContainsKey('MgmtVlan'))    { $labCfg.MgmtVlan }    else { 230 }
+    $mgmtAdapterName = if ($labCfg.ContainsKey('MgmtAdapters')) { @($labCfg.MgmtAdapters)[0] } else { 'Integrated NIC 1 Port 1-1' }
+
+    $mapLines = ($nodes | ForEach-Object { "  '$($_.ServiceTag)' = @{ Name = '$($_.Name)'; Ip = '$($_.HostIP)' }" }) -join "`r`n"
+
+    Write-Step "Network bake: ON. Per service tag ->" 'Yellow'
+    foreach ($n in $nodes) { Write-Step ("    {0}  ->  {1}  {2}" -f $n.ServiceTag, $n.Name, $n.HostIP) 'Yellow' }
+    Write-Step "  Adapter '$mgmtAdapterName', VLAN $vlan, gw $gw, dns $dns, /$MgmtPrefixLength; WinRM + RDP enabled." 'Yellow'
+
+    $spScript = @"
+`$ErrorActionPreference = 'SilentlyContinue'
+`$log = "`$env:SystemDrive\Windows\Temp\netbootstrap.log"
+function W(`$m){ `$t=(Get-Date).ToString('HH:mm:ss'); Add-Content -Path `$log -Value "`$t `$m" }
+W '=== network bootstrap (specialize) ==='
+`$map = @{
+$mapLines
+}
+`$tag = (Get-CimInstance -ClassName Win32_SystemEnclosure -ErrorAction SilentlyContinue).SerialNumber
+if (-not `$tag) { `$tag = (Get-CimInstance -ClassName Win32_BIOS -ErrorAction SilentlyContinue).SerialNumber }
+`$tag = "`$tag".Trim()
+W "Service tag: `$tag"
+`$cfg = `$map[`$tag]
+if (-not `$cfg) { W "No mapping for tag '`$tag' - leaving network unchanged."; exit 0 }
+W "Target host=`$(`$cfg.Name) ip=`$(`$cfg.Ip)"
+try { Rename-Computer -NewName `$cfg.Name -Force -ErrorAction Stop; W "Renamed -> `$(`$cfg.Name) (applies on reboot)" } catch { W "rename: `$(`$_.Exception.Message)" }
+`$ad = Get-NetAdapter -Name '$mgmtAdapterName' -ErrorAction SilentlyContinue
+if (-not `$ad) { `$ad = Get-NetAdapter | Where-Object { `$_.InterfaceDescription -match 'QL41232' -and `$_.Status -eq 'Up' } | Select-Object -First 1 }
+if (-not `$ad) { `$ad = Get-NetAdapter | Where-Object { `$_.Status -eq 'Up' -and `$_.Name -notmatch 'SLOT 2|Embedded' } | Select-Object -First 1 }
+if (-not `$ad) { W 'No management adapter found - abort network cfg.'; exit 0 }
+W "Adapter: `$(`$ad.Name)"
+try { Set-NetAdapterAdvancedProperty -Name `$ad.Name -DisplayName 'VLAN ID' -DisplayValue '$vlan' -ErrorAction Stop; W "VLAN ID = $vlan"; Start-Sleep -Seconds 5 } catch { W "vlan: `$(`$_.Exception.Message)" }
+`$ad  = Get-NetAdapter -Name `$ad.Name -ErrorAction SilentlyContinue
+`$idx = `$ad.InterfaceIndex
+try {
+  Remove-NetIPAddress -InterfaceIndex `$idx -AddressFamily IPv4 -Confirm:`$false -ErrorAction SilentlyContinue
+  Remove-NetRoute -InterfaceIndex `$idx -DestinationPrefix '0.0.0.0/0' -Confirm:`$false -ErrorAction SilentlyContinue
+  New-NetIPAddress -InterfaceIndex `$idx -IPAddress `$cfg.Ip -PrefixLength $MgmtPrefixLength -DefaultGateway '$gw' -ErrorAction Stop | Out-Null
+  W "IP `$(`$cfg.Ip)/$MgmtPrefixLength gw $gw"
+} catch { W "ip: `$(`$_.Exception.Message)" }
+try { Set-DnsClientServerAddress -InterfaceIndex `$idx -ServerAddresses '$dns' -ErrorAction Stop; W "DNS $dns" } catch { W "dns: `$(`$_.Exception.Message)" }
+try { Enable-PSRemoting -Force -SkipNetworkProfileCheck -ErrorAction Stop; W 'PSRemoting enabled' } catch { W "psremoting: `$(`$_.Exception.Message)" }
+try { Set-NetConnectionProfile -InterfaceIndex `$idx -NetworkCategory Private -ErrorAction SilentlyContinue; W 'profile Private' } catch {}
+try {
+  Set-ItemProperty 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name fDenyTSConnections -Value 0 -ErrorAction Stop
+  Enable-NetFirewallRule -DisplayGroup 'Remote Desktop' -ErrorAction SilentlyContinue
+  W 'RDP enabled'
+} catch { W "rdp: `$(`$_.Exception.Message)" }
+W 'network bootstrap done.'
+exit 0
+"@
+    $spB64 = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($spScript))
+    $spRun = "cmd /c powershell.exe -NoProfile -ExecutionPolicy Bypass -EncodedCommand $spB64"
+    $netSpecializeXml = @"
+  <settings pass="specialize">
+    <component name="Microsoft-Windows-Deployment"
+               processorArchitecture="amd64"
+               publicKeyToken="31bf3856ad364e35" language="neutral" versionScope="nonSxS">
+      <RunSynchronous>
+        <RunSynchronousCommand wcm:action="add">
+          <Order>1</Order>
+          <Path>$spRun</Path>
+          <Description>Bootstrap hostname, VLAN, static IP, WinRM and RDP</Description>
+        </RunSynchronousCommand>
+      </RunSynchronous>
+    </component>
+  </settings>
+"@
+}
+
 $xml = @"
 <?xml version="1.0" encoding="utf-8"?>
 <unattend xmlns="urn:schemas-microsoft-com:unattend" xmlns:wcm="http://schemas.microsoft.com/WMIConfig/2002/State">
@@ -248,7 +340,7 @@ $imageInstallXml$diskSetupXml      <UserData>
       </UserData>
     </component>
   </settings>
-  <settings pass="oobeSystem">
+$netSpecializeXml  <settings pass="oobeSystem">
     <component name="Microsoft-Windows-International-Core"
                processorArchitecture="amd64"
                publicKeyToken="31bf3856ad364e35" language="neutral" versionScope="nonSxS">
@@ -381,6 +473,7 @@ try {
     Write-Host "Locale: $Locale   TimeZone: $TimeZone" -ForegroundColor Cyan
     Write-Host "Boot: $(if($biosRel){'BIOS + UEFI'}else{'UEFI'}) El Torito (single RFS mount, no RFS2 needed)." -ForegroundColor Cyan
     Write-Host "Disk: $(if($AutoSelectBootDisk){'AUTOMATIC (experimental WinPE BOSS auto-select)'}else{'INTERACTIVE (operator picks BOSS at the disk screen)'})." -ForegroundColor Cyan
+    Write-Host "Network: $(if($BakeNetworkConfig){'BAKED (per-tag hostname/IP/VLAN + WinRM/RDP in specialize)'}else{'NOT baked (configure via iDRAC console or Stage 2 -Apply)'})." -ForegroundColor Cyan
     Write-Host "Treat this ISO as a secret (it contains the obfuscated admin password); it is gitignored." -ForegroundColor Yellow
     Write-Host ""
     Write-Host "Deploy with a SINGLE RFS mount:" -ForegroundColor Cyan

@@ -145,17 +145,39 @@ The fix is a single RFS mount with the answer file slipstreamed into the golden 
 
 `make-golden-with-unattend.ps1` repacks the ISO with **oscdimg**: it mounts the golden ISO, robocopies the tree to a staging folder, drops `Autounattend.xml` at the root, and rebuilds with UDF (the install image inside can exceed the 4 GB ISO9660 limit) plus the BIOS+UEFI El Torito boot catalog (`efisys_noprompt.bin`, which also removes the "Press any key to boot" prompt). IMAPI2 was tried first but fails on large dual-boot Windows media (error `0xC0AAB132` in `CreateResultImage`) and is not registered on Server Core — oscdimg is the reliable, Microsoft-supported path. Building needs free disk ~2x the ISO size (staging + output). Validate the first output by booting one node before relying on it for both.
 
-### Automatic BOSS boot-disk selection (default)
+### Boot-disk selection
 
-By default the generated ISO selects and partitions the BOSS boot volume automatically, so the install is fully hands-off end to end. During WinPE, an embedded `RunSynchronous` command detects the BOSS RAID-1 VD by its **controller identity** (its disk enumerates with a `BOSS` friendly name), then `diskpart` cleans it and creates the UEFI/GPT layout; Setup installs to that partition via `InstallToAvailablePartition`.
+`make-golden-with-unattend.ps1` runs hands-off through language/locale/timezone/password. Disk selection has two modes:
 
-- **Model-agnostic — no size to configure.** Matching on the BOSS identity works whether BOSS is 223 GB (R650 BOSS-S2), 960 GB (R670 BOSS-N1), or any other size. So the BOSS size does **not** need to be a lab-config value; it is discovered at deploy time. (Per the Dell Private Cloud hardware configuration guide, BOSS card capacity varies by PowerEdge model — e.g. R670 ships BOSS-N1 with 2× M.2 960 GB RAID-1 — which is exactly why identity-based detection is used instead of a size threshold.)
-- **Safety guard.** If detection is ambiguous (0 or more than 1 candidate), the command exits non-zero and stops **before touching any disk**, so it can never install onto an S2D data disk by mistake — you then select manually.
-- **Assumption.** On an Azure Local node only the BOSS volume should hold a Windows partition; the S2D data/cache disks do not. The script cleans + partitions BOSS, and `InstallToAvailablePartition` targets that fresh Windows partition.
-- **Default is INTERACTIVE:** `make-golden-with-unattend.ps1` builds an ISO that runs hands-off through language/locale/timezone/password, then pauses ONLY at the disk screen so the operator picks the BOSS RAID-1 `OS` volume (~223 GB). This is the proven path (used successfully on both nodes).
-- **Validate answer-file changes fast (no 8 GB rebuild):** generate just the XML with `make-unattend-xml-only.ps1`, put it on a FAT32 USB or the WinPE `X:` drive, and run `setup.exe /unattend:<path>` from Shift+F10. Setup accepting it (a `C:\Windows\Panther\unattend.xml` appears after restart) confirms the XML is valid. Only then rebuild the ISO. A wrong element order (must be `ImageInstall` → `RunSynchronous` → `UserData`) makes Setup reject the whole file and fail with `0x80070001 - 0x4003x`.
-- **Experimental auto-select (`-AutoSelectBootDisk`):** injects a WinPE `RunSynchronous` step that partitions the BOSS disk automatically. NOT yet validated — on the Azure Local golden image an early version produced an answer file Windows Setup rejected outright (no `Panther\unattend.xml`, apply error `0x80070001 - 0x4003x`). Only use after validating on a scratch/test node.
-- **Tuning (rarely needed):** `-BootDiskModelMatch` (default `(?i)boss`) is the identity regex; `-BootDiskMaxSizeGB` is an optional ceiling used **only** by the smallest-disk fallback when no disk matches the regex.
+- **Interactive (default, proven):** Setup pauses only at the disk screen; the operator picks the BOSS RAID-1 `OS` volume (~223 GB on R650). Used successfully on both nodes.
+- **Automatic (`-AutoSelectBootDisk`):** a WinPE `RunSynchronous` step detects the BOSS RAID-1 VD by **controller identity** (its disk enumerates with a `BOSS` friendly name — model-agnostic, no size to configure), then `diskpart` cleans it and creates the UEFI/GPT layout; Setup installs via `InstallToAvailablePartition`. If detection is ambiguous (0 or >1 candidates) it exits non-zero and stops **before touching any disk**, so it can never wipe an S2D data disk. Element order in the answer file must be `ImageInstall` → `RunSynchronous` → `UserData`, or Setup rejects the whole file (`0x80070001 - 0x4003x`). Tuning: `-BootDiskModelMatch` (default `(?i)boss`), `-BootDiskMaxSizeGB` (ceiling for the smallest-disk fallback only).
+
+### Baked-in network + remote access (`-BakeNetworkConfig`)
+
+A fresh install otherwise comes up with **no IP** (APIPA only), reachable solely via the iDRAC console. `-BakeNetworkConfig` injects a `specialize`-pass script that makes each node self-configure and become remotely reachable — no console work:
+
+- Reads the node's **Dell service tag** (`Win32_SystemEnclosure.SerialNumber`) and matches it to `lab-config.psd1` `Nodes` (ServiceTag → Name + HostIP). For this lab: `JF7C7J3 → azljkt01n1 / 10.8.230.232`, `1G7C7J3 → azljkt01n2 / 10.8.230.235`.
+- Sets the **hostname**, tags **VLAN 230** on the management adapter (`Integrated NIC 1 Port 1-1`), sets **static IP / gateway 10.8.230.1 / DNS 10.8.230.51** (/24), and enables **WinRM + RDP** (profile set Private).
+- All values come from `lab-config.psd1` (gateway, DNS, VLAN, mgmt adapter, per-node IP/tag) — the single source of truth. `-MgmtPrefixLength` overrides the /24 default.
+- The specialize script logs to `C:\Windows\Temp\netbootstrap.log` on the node; if the service tag has no mapping it leaves networking unchanged and exits cleanly.
+
+Combined fully-automated build + install (both features):
+
+```powershell
+# On the build/jump host (needs oscdimg + lab-config.psd1 in scripts/powershell/config)
+.\make-golden-with-unattend.ps1 -AutoSelectBootDisk -BakeNetworkConfig `
+  -GoldenIso ..\..\isos\AzureLocal24H2.<...>_A01.en-us.iso `
+  -OutputIso ..\..\isos\AzureLocal-auto.iso
+
+.\bootstrap-cluster.ps1 -Stage 01-deploy-os -OnlyNode 10.8.230.86 -HttpHost <server-ip> `
+  -RACADMPath 'C:\Program Files\Dell\SysMgt\iDRACTools\racadm\racadm.exe' `
+  -ISOFile ..\..\isos\AzureLocal-auto.iso -StartInstallation -NoCertWarn
+```
+
+After install the node should be reachable: `Test-NetConnection <node-ip> -Port 5985` and RDP on 3389 — verify with Stage 2/3 over WinRM instead of the iDRAC console.
+
+> [!IMPORTANT]
+> Both `-AutoSelectBootDisk` and `-BakeNetworkConfig` are answer-file automation that has NOT been validated end-to-end on the Azure Local golden image (the interactive/manual-network path is what installed both current nodes). Test the combined ISO on ONE node first — .86 is the safe test node since reimaging it is non-destructive until the cluster exists. Watch its console: no disk prompt = auto-select worked; after it settles, confirm WinRM/RDP reachability from the jump host. Keep an interactive ISO as fallback.
 
 > [!NOTE]
 > The `01-deploy-os.ps1` worker no longer mounts a second RFS image at all; it actively clears any stale RFS2 before mounting RFS1. The older `make-autounattend-iso.ps1` (separate RFS2 ISO) is deprecated — use `make-golden-with-unattend.ps1` instead.

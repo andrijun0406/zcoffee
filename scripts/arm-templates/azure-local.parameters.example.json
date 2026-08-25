@@ -155,8 +155,8 @@
             "Compute"
           ],
           "adapter": [
-            "Integrated NIC1 Port 1-1",
-            "Integrated NIC1 Port 2-1"
+            "Integrated NIC 1 Port 1-1",
+            "Integrated NIC 1 Port 2-1"
           ],
           "adapterPropertyOverrides": {
             "jumboPacket": "1514",
