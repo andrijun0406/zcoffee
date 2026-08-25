@@ -164,7 +164,7 @@ function Invoke-BiosUpdate {
     if (-not $BiosDupFile) { throw "-UpdateBios requires -BiosDupFile (the BIOS DUP file name, e.g. BIOS_xxxxx_WN64_1.21.1.EXE)." }
     if (-not $BiosRepoUrl) { throw "-UpdateBios requires -BiosRepoUrl (HTTP/HTTPS repo path hosting the BIOS DUP)." }
     Write-Host "== BIOS-only update on $NodeIP =="
-    Write-Host "  DUP: $BiosDupFile   Repo: $BiosRepoProtocol://$BiosRepoUrl"
+    Write-Host "  DUP: $BiosDupFile   Repo: ${BiosRepoProtocol}://$BiosRepoUrl"
     Write-Warn2 "BIOS update reboots the node and can take several minutes."
     # Install a single DUP: -f <dup> -e <repo> -t <proto> -a TRUE apply; --reboot so the staged update completes
     $out = Invoke-RACADM -CommandArguments @('update', '-f', $BiosDupFile, '-e', $BiosRepoUrl, '-t', $BiosRepoProtocol, '-a', 'TRUE', '--reboot')
@@ -182,7 +182,7 @@ function Invoke-IdracUpdate {
     if (-not $IdracDupFile) { throw "-UpdateIdrac requires -IdracDupFile (the iDRAC DUP file name, e.g. iDRAC_xxxxx_WN64_7.30.30.51.EXE)." }
     if (-not $IdracRepoUrl) { throw "-UpdateIdrac requires -IdracRepoUrl (HTTP/HTTPS repo path hosting the iDRAC DUP)." }
     Write-Host "== iDRAC-only update on $NodeIP =="
-    Write-Host "  DUP: $IdracDupFile   Repo: $IdracRepoProtocol://$IdracRepoUrl"
+    Write-Host "  DUP: $IdracDupFile   Repo: ${IdracRepoProtocol}://$IdracRepoUrl"
     Write-Warn2 "iDRAC update reboots the iDRAC itself; connectivity drops briefly during the update."
     # Install a single DUP: -f <dup> -e <repo> -t <proto> -a TRUE apply. iDRAC firmware applies immediately
     # and the iDRAC self-reboots; no host --reboot flag is needed.
