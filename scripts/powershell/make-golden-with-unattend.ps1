@@ -353,6 +353,7 @@ try {
 try { Set-DnsClientServerAddress -InterfaceIndex `$idx -ServerAddresses '$dns' -ErrorAction Stop; W "DNS $dns" } catch { W "dns error: `$(`$_.Exception.Message)" }
   try { `$ls = (Get-NetAdapter -InterfaceIndex `$idx -ErrorAction SilentlyContinue); W "Link status after config: `$(`$ls.Status) / `$(`$ls.LinkSpeed) (media=`$(`$ls.MediaConnectionState))" } catch { }
 try { Enable-PSRemoting -Force -SkipNetworkProfileCheck -ErrorAction Stop; W 'WinRM/PSRemoting enabled' } catch { W "winrm error: `$(`$_.Exception.Message)" }
+try { Test-WSMan -ErrorAction Stop | Out-Null; W 'WinRM validation successful (listener responding)' } catch { W "WinRM validation FAILED: `$(`$_.Exception.Message)" }
 try { Set-NetConnectionProfile -InterfaceIndex `$idx -NetworkCategory Private -ErrorAction SilentlyContinue; W 'Network profile Private' } catch {}
 try {
   Set-ItemProperty 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name fDenyTSConnections -Value 0 -ErrorAction Stop
