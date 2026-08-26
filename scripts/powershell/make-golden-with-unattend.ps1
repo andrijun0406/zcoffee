@@ -193,22 +193,30 @@ echo [%DATE% %TIME%] === END DISK INVENTORY ===>> "%LOG%"
 rem --- Detect the BOSS boot VD by exact model. Require EXACTLY one. Never guess. ---
 set "BOSS_INDEX="
 set /a BOSS_COUNT=0
-for /f %%i in ('wmic diskdrive where "model='DELLBOSS VD'" get index ^| findstr /r "^[0-9]"') do (
-    set /a BOSS_INDEX=%%i 2>nul
-    set /a BOSS_COUNT+=1
+rem WinPE has no findstr - parse WMIC directly. skip=1 drops the 'Index' header;
+rem blank/whitespace lines are ignored; set /a strips WMIC's trailing CR and forces numeric.
+for /f "skip=1 tokens=1" %%i in ('wmic diskdrive where "model='DELLBOSS VD'" get index') do (
+    if not "%%i"=="" (
+        set /a BOSS_INDEX=%%i 2>nul
+        set /a BOSS_COUNT+=1
+    )
 )
 echo [%DATE% %TIME%] BOSS 'DELLBOSS VD' disks found: !BOSS_COUNT!   index: !BOSS_INDEX!>> "%LOG%"
 
 if "!BOSS_COUNT!"=="0" (
     echo [%DATE% %TIME%] RESULT: no DELLBOSS VD detected - NOT partitioning. Setup will show the disk screen; operator selects BOSS manually. Never guessing.>> "%LOG%"
-    endlocal ^& exit /b 0
+    endlocal ^& exit /b 10
 )
 if not "!BOSS_COUNT!"=="1" (
     echo [%DATE% %TIME%] RESULT: multiple DELLBOSS VD detected (!BOSS_COUNT!) - AMBIGUOUS, NOT partitioning. Operator selects manually. Never guessing.>> "%LOG%"
-    endlocal ^& exit /b 0
+    endlocal ^& exit /b 11
 )
 
-rem --- Exactly one BOSS: generate the diskpart script ---
+rem --- Exactly one BOSS: re-confirm and log the exact device before touching it ---
+echo [%DATE% %TIME%] Selected BOSS disk index=!BOSS_INDEX!>> "%LOG%"
+wmic diskdrive where "index=!BOSS_INDEX!" get index,model,size >> "%LOG%" 2>&1
+
+rem --- Generate the diskpart script ---
 set "DP=X:\boss.txt"
 > "%DP%" echo select disk !BOSS_INDEX!
 >> "%DP%" echo clean
