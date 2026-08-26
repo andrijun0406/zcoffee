@@ -184,6 +184,11 @@ try {
   # BOSS identity indicators (case-insensitive). Broader than a single 'boss' token so it also
   # catches 'Boot Optimized Storage', 'Dell BOSS', 'Dell BOSS-N1', 'Dell BOSS-S2', etc.
   `$idPatterns = @('$rx','boot optimized storage','dell boss','boss-n','boss-s')
+  # Forensic dump: full Get-Disk properties (once) so we can see exactly how Azure Local WinPE
+  # enumerates the BOSS-S2 VD vs cache SSD vs capacity HDD on this platform.
+  W '=== FULL DISK INVENTORY (Get-Disk | Format-List *) ==='
+  try { Get-Disk | Format-List * | Out-String -Width 400 | ForEach-Object { `$_.Split("`n") } | ForEach-Object { if (`$_.Trim()) { W `$_.TrimEnd() } } } catch { W ("disk inventory error: " + `$_.Exception.Message) }
+  W '=== END FULL DISK INVENTORY ==='
   # Exclude removable buses (USB/SD/MMC) up front.
   `$all = Get-Disk | Where-Object { `$_.BusType -notin 'USB','SD','MMC' }
   foreach (`$d in `$all) {
@@ -321,10 +326,10 @@ for (`$i=0; `$i -lt 30; `$i++) {
     `$ad = Get-NetAdapter -Physical -ErrorAction SilentlyContinue | Where-Object { (`$_.MacAddress -replace '[:\-\.]','').ToUpper() -eq `$norm } | Select-Object -First 1
     if (`$ad) { W "Adapter matched by MAC `$(`$cfg.Mac): `$(`$ad.Name)" }
   }
-  if (-not `$ad) { `$ad = Get-NetAdapter -Name `$mgmtName -ErrorAction SilentlyContinue | Where-Object { `$_.Status -eq 'Up' } | Select-Object -First 1 }
-  if (-not `$ad) { `$ad = Get-NetAdapter -ErrorAction SilentlyContinue | Where-Object { `$_.InterfaceDescription -match 'QL41232' -and `$_.Status -eq 'Up' -and `$_.Name -notmatch 'SLOT 2' } | Sort-Object Name | Select-Object -First 1 }
+  if (-not `$ad) { `$ad = Get-NetAdapter -Name `$mgmtName -ErrorAction SilentlyContinue | Select-Object -First 1 }
+  if (-not `$ad) { `$c = @(Get-NetAdapter -ErrorAction SilentlyContinue | Where-Object { `$_.InterfaceDescription -match 'QL41232' -and `$_.Name -notmatch 'SLOT 2' }); if (`$c.Count -eq 1) { `$ad = `$c[0] } elseif (`$c.Count -gt 1) { W "AMBIGUOUS: `$(`$c.Count) QL41232 non-SLOT2 ports present; set MgmtMac in lab-config.psd1 to disambiguate. NOT guessing."; exit 5 } }
   if (`$ad) { W "Management adapter after `$(`$i*10)s: `$(`$ad.Name) [`$(`$ad.InterfaceDescription)] MAC=`$(`$ad.MacAddress)"; break }
-  W "Attempt `$(`$i+1)/30: no suitable Up adapter yet; waiting 10s for NIC drivers..."
+  W "Attempt `$(`$i+1)/30: mgmt adapter not present yet; waiting 10s for NIC drivers..."
   Start-Sleep -Seconds 10
 }
 if (-not `$ad) { W 'TIMEOUT/AMBIGUOUS: could not uniquely identify the management adapter (MAC / configured name / QL41232-not-SLOT2) after 5 minutes. NOT guessing - leaving network unconfigured. Set MgmtMac in lab-config.psd1.'; exit 5 }
@@ -346,6 +351,7 @@ try {
   W "IP `$(`$cfg.Ip)/$MgmtPrefixLength gw $gw"
 } catch { W "ip error: `$(`$_.Exception.Message)" }
 try { Set-DnsClientServerAddress -InterfaceIndex `$idx -ServerAddresses '$dns' -ErrorAction Stop; W "DNS $dns" } catch { W "dns error: `$(`$_.Exception.Message)" }
+  try { `$ls = (Get-NetAdapter -InterfaceIndex `$idx -ErrorAction SilentlyContinue); W "Link status after config: `$(`$ls.Status) / `$(`$ls.LinkSpeed) (media=`$(`$ls.MediaConnectionState))" } catch { }
 try { Enable-PSRemoting -Force -SkipNetworkProfileCheck -ErrorAction Stop; W 'WinRM/PSRemoting enabled' } catch { W "winrm error: `$(`$_.Exception.Message)" }
 try { Set-NetConnectionProfile -InterfaceIndex `$idx -NetworkCategory Private -ErrorAction SilentlyContinue; W 'Network profile Private' } catch {}
 try {
