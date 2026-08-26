@@ -169,6 +169,8 @@ $plain = $null
 # instead of risking a wrong-disk install onto an S2D data disk.
 $diskSetupXml = ''
 $imageInstallXml = ''
+$script:StageBootSelect = $false
+$script:BootSelectScript = ''
 if ($AutoSelectBootDisk) {
     $ceiling = [int]$BootDiskMaxSizeGB
     $rx = $BootDiskModelMatch
@@ -208,9 +210,13 @@ try {
   exit 0
 } catch { W ("ERROR: " + `$_.Exception.Message); exit 3 }
 "@
-    $peBytes = [Text.Encoding]::Unicode.GetBytes($peScript)
-    $peB64   = [Convert]::ToBase64String($peBytes)
-    $runCmd  = "cmd /c powershell.exe -NoProfile -ExecutionPolicy Bypass -EncodedCommand $peB64"
+    # The unattend schema limits RunSynchronousCommand/Path to 259 chars. A base64 -EncodedCommand
+    # of this script is multi-KB and exceeds it, which makes Setup reject the ENTIRE answer file
+    # (0x80220005 "Value is invalid"). So stage the script as a file at the ISO root and invoke it
+    # with a SHORT Path that searches the media drive letters from within WinPE.
+    $script:StageBootSelect  = $true
+    $script:BootSelectScript = $peScript
+    $runCmd = 'cmd /c for %d in (C D E F G H I J) do @if exist %d:\bootselect.ps1 powershell -NoProfile -ExecutionPolicy Bypass -File %d:\bootselect.ps1'
     $diskSetupXml = @"
       <RunSynchronous>
         <RunSynchronousCommand wcm:action="add">
@@ -239,6 +245,8 @@ try {
 # maps it to hostname + management IP from lab-config.psd1, tags VLAN, sets a static IP/GW/DNS on
 # the management adapter, and enables WinRM + RDP so the node is remotely reachable after install.
 $netSpecializeXml = ''
+$script:StageNetScripts = $false
+$script:NetBootstrapScript = ''
 if ($BakeNetworkConfig) {
     $nodes = @()
     if ($labCfg.ContainsKey('Nodes')) { $nodes = @($labCfg.Nodes) }
@@ -296,23 +304,14 @@ try {
 W 'network bootstrap done.'
 exit 0
 "@
-    $spB64 = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($spScript))
-    $spRun = "cmd /c powershell.exe -NoProfile -ExecutionPolicy Bypass -EncodedCommand $spB64"
-    $netSpecializeXml = @"
-  <settings pass="specialize">
-    <component name="Microsoft-Windows-Deployment"
-               processorArchitecture="amd64"
-               publicKeyToken="31bf3856ad364e35" language="neutral" versionScope="nonSxS">
-      <RunSynchronous>
-        <RunSynchronousCommand wcm:action="add">
-          <Order>1</Order>
-          <Path>$spRun</Path>
-          <Description>Bootstrap hostname, VLAN, static IP, WinRM and RDP</Description>
-        </RunSynchronousCommand>
-      </RunSynchronous>
-    </component>
-  </settings>
-"@
+    # IMPORTANT: do NOT embed this script as a RunSynchronousCommand <Path> in the answer file.
+    # A multi-KB -EncodedCommand exceeds the unattend schema Path length limit, and Setup then
+    # rejects the ENTIRE Autounattend.xml (0x80220005 "Value is invalid"), failing the whole install.
+    # Instead we stage the script as a file and run it via SetupComplete.cmd ($OEM$), which has no
+    # length limit and is not schema-validated. The answer file stays the proven-good minimal shape.
+    $script:NetBootstrapScript = $spScript
+    $script:StageNetScripts = $true
+    $netSpecializeXml = ''   # nothing injected into the answer file
 }
 
 $xml = @"
@@ -424,6 +423,34 @@ try {
     $xmlPath = Join-Path $StagingDir 'Autounattend.xml'
     Set-Content -LiteralPath $xmlPath -Value $xml -Encoding UTF8
     Write-Step "Autounattend.xml written to staging root."
+
+    # --- Network bake: stage SetupComplete.cmd + netbootstrap.ps1 via $OEM$ (no answer-file length limit) ---
+    if ($script:StageNetScripts) {
+        # $OEM$\$$ maps to %WINDIR%, so files land in C:\Windows\Setup\Scripts on the target.
+        $scriptsRel = Join-Path 'sources' (Join-Path '$OEM$' (Join-Path '$$' (Join-Path 'Setup' 'Scripts')))
+        $scriptsDir = Join-Path $StagingDir $scriptsRel
+        New-Item -ItemType Directory -Path $scriptsDir -Force | Out-Null
+
+        $ps1Path = Join-Path $scriptsDir 'netbootstrap.ps1'
+        Set-Content -LiteralPath $ps1Path -Value $script:NetBootstrapScript -Encoding UTF8
+
+        # SetupComplete.cmd is auto-run by Windows Setup at the end of install (headless, as SYSTEM).
+        $cmdLines = @(
+            '@echo off',
+            'powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%WINDIR%\Setup\Scripts\netbootstrap.ps1" >> "%WINDIR%\Temp\netbootstrap-cmd.log" 2>&1',
+            'exit /b 0'
+        )
+        $cmdPath = Join-Path $scriptsDir 'SetupComplete.cmd'
+        Set-Content -LiteralPath $cmdPath -Value ($cmdLines -join "`r`n") -Encoding ASCII
+        Write-Step "Network bake staged via `$OEM`$: SetupComplete.cmd + netbootstrap.ps1 (runs post-setup, no answer-file length limit)." 'Green'
+    }
+
+    # --- Auto-select disk: stage bootselect.ps1 at the ISO ROOT (invoked by the short WinPE Path) ---
+    if ($script:StageBootSelect) {
+        $bsPath = Join-Path $StagingDir 'bootselect.ps1'
+        Set-Content -LiteralPath $bsPath -Value $script:BootSelectScript -Encoding UTF8
+        Write-Step "Auto-select staged: bootselect.ps1 at ISO root (short Path invokes it in WinPE)." 'Green'
+    }
 
     # --- Dismount the source ISO (no longer needed once copied) ---
     Write-Step "Dismounting source golden ISO..."

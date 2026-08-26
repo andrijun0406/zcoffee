@@ -34,8 +34,6 @@ param(
     [switch]$AutoSelectBootDisk,
     [string]$BootDiskModelMatch = '(?i)boss',
     [int]$BootDiskMaxSizeGB = 0,
-    [switch]$BakeNetworkConfig,                  # opt IN to bake hostname + static IP/VLAN + WinRM/RDP (specialize pass)
-    [int]$MgmtPrefixLength = 24,
     [switch]$AsIso,
     [string]$OutputIso   = (Join-Path $PSScriptRoot 'autounattend.iso'),
     [string]$OscdimgPath
@@ -43,10 +41,6 @@ param(
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
-
-# --- Load lab-config.psd1 (single source of truth) for the network bake ---
-$__cfgPath = Join-Path $PSScriptRoot 'config\lab-config.psd1'
-$labCfg = if (Test-Path $__cfgPath) { Import-PowerShellDataFile -Path $__cfgPath } else { @{} }
 
 function Test-PasswordComplexity {
     param([string]$Plain)
@@ -140,84 +134,6 @@ try {
     Write-Host 'Disk selection: INTERACTIVE (Setup pauses at the disk screen).' -ForegroundColor Yellow
 }
 
-# --- Build the per-node network bootstrap (specialize pass) or leave empty ---
-$netSpecializeXml = ''
-if ($BakeNetworkConfig) {
-    $nodes = @()
-    if ($labCfg.ContainsKey('Nodes')) { $nodes = @($labCfg.Nodes) }
-    if (-not $nodes -or $nodes.Count -eq 0) { throw 'BakeNetworkConfig requires Nodes in lab-config.psd1 (ServiceTag + HostIP + Name).' }
-
-    $gw   = if ($labCfg.ContainsKey('Gateway'))   { $labCfg.Gateway }   else { '10.8.230.1' }
-    $dns  = if ($labCfg.ContainsKey('DnsServer')) { $labCfg.DnsServer } else { '10.8.230.51' }
-    $vlan = if ($labCfg.ContainsKey('MgmtVlan'))  { $labCfg.MgmtVlan }  else { 230 }
-    $mgmtAdapterName = if ($labCfg.ContainsKey('MgmtAdapters')) { @($labCfg.MgmtAdapters)[0] } else { 'Integrated NIC 1 Port 1-1' }
-
-    $mapLines = ($nodes | ForEach-Object { "  '$($_.ServiceTag)' = @{ Name = '$($_.Name)'; Ip = '$($_.HostIP)' }" }) -join "`r`n"
-
-    Write-Host "Network bake: ON. Per service tag ->" -ForegroundColor Yellow
-    foreach ($n in $nodes) { Write-Host ("    {0}  ->  {1}  {2}" -f $n.ServiceTag, $n.Name, $n.HostIP) -ForegroundColor Yellow }
-    Write-Host "  Adapter '$mgmtAdapterName', VLAN $vlan, gw $gw, dns $dns, /$MgmtPrefixLength; WinRM + RDP enabled." -ForegroundColor Yellow
-
-    $spScript = @"
-`$ErrorActionPreference = 'SilentlyContinue'
-`$log = "`$env:SystemDrive\Windows\Temp\netbootstrap.log"
-function W(`$m){ `$t=(Get-Date).ToString('HH:mm:ss'); Add-Content -Path `$log -Value "`$t `$m" }
-W '=== network bootstrap (specialize) ==='
-`$map = @{
-$mapLines
-}
-`$tag = (Get-CimInstance -ClassName Win32_SystemEnclosure -ErrorAction SilentlyContinue).SerialNumber
-if (-not `$tag) { `$tag = (Get-CimInstance -ClassName Win32_BIOS -ErrorAction SilentlyContinue).SerialNumber }
-`$tag = "`$tag".Trim()
-W "Service tag: `$tag"
-`$cfg = `$map[`$tag]
-if (-not `$cfg) { W "No mapping for tag '`$tag' - leaving network unchanged."; exit 0 }
-W "Target host=`$(`$cfg.Name) ip=`$(`$cfg.Ip)"
-try { Rename-Computer -NewName `$cfg.Name -Force -ErrorAction Stop; W "Renamed -> `$(`$cfg.Name) (applies on reboot)" } catch { W "rename: `$(`$_.Exception.Message)" }
-`$ad = Get-NetAdapter -Name '$mgmtAdapterName' -ErrorAction SilentlyContinue
-if (-not `$ad) { `$ad = Get-NetAdapter | Where-Object { `$_.InterfaceDescription -match 'QL41232' -and `$_.Status -eq 'Up' } | Select-Object -First 1 }
-if (-not `$ad) { `$ad = Get-NetAdapter | Where-Object { `$_.Status -eq 'Up' -and `$_.Name -notmatch 'SLOT 2|Embedded' } | Select-Object -First 1 }
-if (-not `$ad) { W 'No management adapter found - abort network cfg.'; exit 0 }
-W "Adapter: `$(`$ad.Name)"
-try { Set-NetAdapterAdvancedProperty -Name `$ad.Name -DisplayName 'VLAN ID' -DisplayValue '$vlan' -ErrorAction Stop; W "VLAN ID = $vlan"; Start-Sleep -Seconds 5 } catch { W "vlan: `$(`$_.Exception.Message)" }
-`$ad  = Get-NetAdapter -Name `$ad.Name -ErrorAction SilentlyContinue
-`$idx = `$ad.InterfaceIndex
-try {
-  Remove-NetIPAddress -InterfaceIndex `$idx -AddressFamily IPv4 -Confirm:`$false -ErrorAction SilentlyContinue
-  Remove-NetRoute -InterfaceIndex `$idx -DestinationPrefix '0.0.0.0/0' -Confirm:`$false -ErrorAction SilentlyContinue
-  New-NetIPAddress -InterfaceIndex `$idx -IPAddress `$cfg.Ip -PrefixLength $MgmtPrefixLength -DefaultGateway '$gw' -ErrorAction Stop | Out-Null
-  W "IP `$(`$cfg.Ip)/$MgmtPrefixLength gw $gw"
-} catch { W "ip: `$(`$_.Exception.Message)" }
-try { Set-DnsClientServerAddress -InterfaceIndex `$idx -ServerAddresses '$dns' -ErrorAction Stop; W "DNS $dns" } catch { W "dns: `$(`$_.Exception.Message)" }
-try { Enable-PSRemoting -Force -SkipNetworkProfileCheck -ErrorAction Stop; W 'PSRemoting enabled' } catch { W "psremoting: `$(`$_.Exception.Message)" }
-try { Set-NetConnectionProfile -InterfaceIndex `$idx -NetworkCategory Private -ErrorAction SilentlyContinue; W 'profile Private' } catch {}
-try {
-  Set-ItemProperty 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name fDenyTSConnections -Value 0 -ErrorAction Stop
-  Enable-NetFirewallRule -DisplayGroup 'Remote Desktop' -ErrorAction SilentlyContinue
-  W 'RDP enabled'
-} catch { W "rdp: `$(`$_.Exception.Message)" }
-W 'network bootstrap done.'
-exit 0
-"@
-    $spB64 = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($spScript))
-    $spRun = "cmd /c powershell.exe -NoProfile -ExecutionPolicy Bypass -EncodedCommand $spB64"
-    $netSpecializeXml = @"
-  <settings pass="specialize">
-    <component name="Microsoft-Windows-Deployment"
-               processorArchitecture="amd64"
-               publicKeyToken="31bf3856ad364e35" language="neutral" versionScope="nonSxS">
-      <RunSynchronous>
-        <RunSynchronousCommand wcm:action="add">
-          <Order>1</Order>
-          <Path>$spRun</Path>
-          <Description>Bootstrap hostname, VLAN, static IP, WinRM and RDP</Description>
-        </RunSynchronousCommand>
-      </RunSynchronous>
-    </component>
-  </settings>
-"@
-}
-
 $xml = @"
 <?xml version="1.0" encoding="utf-8"?>
 <unattend xmlns="urn:schemas-microsoft-com:unattend" xmlns:wcm="http://schemas.microsoft.com/WMIConfig/2002/State">
@@ -243,7 +159,7 @@ $imageInstallXml$diskSetupXml      <UserData>
       </UserData>
     </component>
   </settings>
-$netSpecializeXml  <settings pass="oobeSystem">
+  <settings pass="oobeSystem">
     <component name="Microsoft-Windows-International-Core"
                processorArchitecture="amd64"
                publicKeyToken="31bf3856ad364e35" language="neutral" versionScope="nonSxS">
