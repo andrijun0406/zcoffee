@@ -65,7 +65,7 @@ param(
     # 960 GB (R670 BOSS-N1), or any other size. No per-model size needs to be configured.
     [switch]$AutoSelectBootDisk,                 # opt IN to EXPERIMENTAL WinPE auto BOSS selection (default: interactive)
     [string]$BootDiskModelMatch = '(?i)boss',    # regex matched against disk FriendlyName/Model to find BOSS
-    [int]$BootDiskMaxSizeGB = 0,                  # optional ceiling for the size-based FALLBACK only (0 = none)
+    [int]$BootDiskMaxSizeGB = 700,                # ceiling (GB) for the SIZE-FALLBACK guess only; identity-matched BOSS is trusted at any size (R650 BOSS-S2 ~223GB, R670 BOSS-N1 ~960GB). R650 lab: BOSS~223, cacheSSD~800, HDD~2.4TB
 
     # --- Bake per-node network + remote access into the answer file (specialize pass) ---
     # Each node self-configures by reading its Dell service tag and matching lab-config.psd1:
@@ -172,30 +172,55 @@ $imageInstallXml = ''
 $script:StageBootSelect = $false
 $script:BootSelectScript = ''
 if ($AutoSelectBootDisk) {
-    $ceiling = [int]$BootDiskMaxSizeGB
+    $ceiling = if ([int]$BootDiskMaxSizeGB -gt 0) { [int]$BootDiskMaxSizeGB } else { 700 }
     $rx = $BootDiskModelMatch
     # PowerShell that runs INSIDE WinPE during Windows Setup (windowsPE pass).
     $peScript = @"
 `$ErrorActionPreference = 'Stop'
 `$log = "`$env:SystemDrive\Windows\Temp\bootdisk-select.log"
-function W(`$m){ `$t = (Get-Date).ToString('HH:mm:ss'); Add-Content -Path `$log -Value "`$t `$m"; Write-Host `$m }
+function W(`$m){ `$t=(Get-Date).ToString('yyyy-MM-dd HH:mm:ss'); Add-Content -Path `$log -Value "`$t  `$m"; Write-Host `$m }
 try {
-  `$rx = '$rx'
   `$maxGb = $ceiling
-  `$all = Get-Disk | Where-Object { `$_.BusType -ne 'USB' }
-  foreach (`$d in `$all) { W ("disk {0}: '{1}' bus={2} size={3}GB" -f `$d.Number, `$d.FriendlyName, `$d.BusType, [math]::Round(`$d.Size/1GB)) }
-  # Primary: match the BOSS controller identity (size-independent, model-agnostic).
-  `$cand = `$all | Where-Object { `$_.FriendlyName -match `$rx -or `$_.Model -match `$rx }
+  # BOSS identity indicators (case-insensitive). Broader than a single 'boss' token so it also
+  # catches 'Boot Optimized Storage', 'Dell BOSS', 'Dell BOSS-N1', 'Dell BOSS-S2', etc.
+  `$idPatterns = @('$rx','boot optimized storage','dell boss','boss-n','boss-s')
+  # Exclude removable buses (USB/SD/MMC) up front.
+  `$all = Get-Disk | Where-Object { `$_.BusType -notin 'USB','SD','MMC' }
+  foreach (`$d in `$all) {
+    W ("disk {0}: name='{1}' model='{2}' bus={3} size={4}GB sn='{5}' path='{6}' loc='{7}' uid='{8}'" -f `$d.Number,`$d.FriendlyName,`$d.Model,`$d.BusType,[math]::Round(`$d.Size/1GB),`$d.SerialNumber,`$d.Path,`$d.Location,`$d.UniqueId)
+  }
+  # Disks already in an EXISTING (non-primordial) storage pool are S2D data devices - never touch them.
+  # In a clean WinPE there is usually no pool, so this list is empty; on a re-image it protects data disks.
+  `$pooledUids = @()
+  try {
+    `$pools = Get-StoragePool -IsPrimordial `$false -ErrorAction SilentlyContinue
+    foreach (`$p in `$pools) { `$pooledUids += (Get-PhysicalDisk -StoragePool `$p -ErrorAction SilentlyContinue | Select-Object -ExpandProperty UniqueId -ErrorAction SilentlyContinue) }
+    if (@(`$pooledUids).Count) { W ("Excluding existing-pool (S2D) disks: {0}" -f (`$pooledUids -join ',')) }
+  } catch { }
+  # --- Priority 1: BOSS identity across FriendlyName/Model/SerialNumber/Location/Path/UniqueId ---
+  `$cand = `$all | Where-Object {
+    `$f = "{0} {1} {2} {3} {4} {5}" -f `$_.FriendlyName,`$_.Model,`$_.SerialNumber,`$_.Location,`$_.Path,`$_.UniqueId
+    `$hit = `$false; foreach (`$p in `$idPatterns) { if (`$f -match `$p) { `$hit = `$true } }; `$hit
+  }
+  if (`$cand) { W ("Priority1 BOSS identity match: {0} candidate(s)" -f @(`$cand).Count) }
+  # --- Priority 2: fallback to smallest local FIXED disk (USB/SD/MMC already excluded) ---
+  # IMPORTANT: the size ceiling ONLY guards this GUESS path. A positively identified BOSS
+  # (Priority 1) is trusted at ANY size - R650 BOSS-S2 ~223GB, R670 BOSS-N1 ~960GB, etc.
+  `$fromIdentity = [bool]`$cand
   if (-not `$cand) {
-    W "No disk matched /`$rx/ by name; falling back to smallest fixed disk."
-    `$fixed = `$all | Where-Object { `$_.BusType -in 'SATA','RAID','NVMe','SAS' }
-    if (`$maxGb -gt 0) { `$fixed = `$fixed | Where-Object { `$_.Size -le (`$maxGb * 1GB) } }
+    W "Priority2 no BOSS identity; smallest local fixed-disk fallback (ceiling `$maxGb GB applies)."
+    `$fixed = `$all | Where-Object { `$_.BusType -in 'SATA','RAID','NVMe','SAS','ATA' -and (`$_.Size/1GB) -le `$maxGb }
     if (`$fixed) { `$min = (`$fixed | Measure-Object -Property Size -Minimum).Minimum; `$cand = `$fixed | Where-Object { `$_.Size -eq `$min } }
   }
+  # --- Priority 3: safety - never an S2D pool member; ceiling applies to the FALLBACK ONLY; require EXACTLY one ---
+  `$cand = @(`$cand | Where-Object { `$pooledUids -notcontains `$_.UniqueId })
+  if (-not `$fromIdentity) { `$cand = @(`$cand | Where-Object { (`$_.Size/1GB) -le `$maxGb }) }
+  foreach (`$c in `$cand) { W ("Priority3 valid candidate: disk {0} '{1}' {2}GB (identityMatch=`$fromIdentity)" -f `$c.Number,`$c.FriendlyName,[math]::Round(`$c.Size/1GB)) }
   `$n = @(`$cand).Count
-  if (`$n -ne 1) { W "AMBIGUOUS: `$n candidate disks - stopping so the operator selects manually."; exit 2 }
+  if (`$n -ne 1) { W ("AMBIGUOUS/NONE: `$n candidate disk(s) after safety filters - STOP; operator selects manually. Never guessing."); exit 2 }
   `$disk = `$cand[0]
-  W ("Selected BOSS boot disk {0}: '{1}' ({2}GB)" -f `$disk.Number, `$disk.FriendlyName, [math]::Round(`$disk.Size/1GB))
+  if ((-not `$fromIdentity) -and ((`$disk.Size/1GB) -gt `$maxGb)) { W ("SAFETY: fallback disk exceeds `$maxGb GB - refusing."); exit 4 }
+  W ("Selected BOSS boot disk {0}: '{1}' ({2}GB, bus={3})" -f `$disk.Number,`$disk.FriendlyName,[math]::Round(`$disk.Size/1GB),`$disk.BusType)
   `$dp = @(
     "select disk `$(`$disk.Number)","clean","convert gpt",
     "create partition efi size=500","format fs=fat32 quick","assign letter=S",
@@ -204,11 +229,11 @@ try {
   ) -join "``r``n"
   `$dpf = "`$env:SystemDrive\Windows\Temp\boss-diskpart.txt"
   Set-Content -Path `$dpf -Value `$dp -Encoding ASCII
-  W "Running diskpart to partition the BOSS disk..."
+  W 'Running diskpart to partition the BOSS disk...'
   diskpart /s `$dpf | Out-Null
-  W "Boot disk prepared."
+  W 'Boot disk prepared.'
   exit 0
-} catch { W ("ERROR: " + `$_.Exception.Message); exit 3 }
+} catch { W ('ERROR: ' + `$_.Exception.Message); exit 3 }
 "@
     # The unattend schema limits RunSynchronousCommand/Path to 259 chars. A base64 -EncodedCommand
     # of this script is multi-KB and exceeds it, which makes Setup reject the ENTIRE answer file
@@ -257,7 +282,10 @@ if ($BakeNetworkConfig) {
     $vlan      = if ($labCfg.ContainsKey('MgmtVlan'))    { $labCfg.MgmtVlan }    else { 230 }
     $mgmtAdapterName = if ($labCfg.ContainsKey('MgmtAdapters')) { @($labCfg.MgmtAdapters)[0] } else { 'Integrated NIC 1 Port 1-1' }
 
-    $mapLines = ($nodes | ForEach-Object { "  '$($_.ServiceTag)' = @{ Name = '$($_.Name)'; Ip = '$($_.HostIP)' }" }) -join "`r`n"
+    $mapLines = ($nodes | ForEach-Object {
+        $mac = if ($_.ContainsKey('MgmtMac')) { $_.MgmtMac } else { '' }
+        "  '$($_.ServiceTag)' = @{ Name = '$($_.Name)'; Ip = '$($_.HostIP)'; Mac = '$mac' }"
+    }) -join "`r`n"
 
     Write-Step "Network bake: ON. Per service tag ->" 'Yellow'
     foreach ($n in $nodes) { Write-Step ("    {0}  ->  {1}  {2}" -f $n.ServiceTag, $n.Name, $n.HostIP) 'Yellow' }
@@ -266,25 +294,38 @@ if ($BakeNetworkConfig) {
     $spScript = @"
 `$ErrorActionPreference = 'SilentlyContinue'
 `$log = "`$env:SystemDrive\Windows\Temp\netbootstrap.log"
-function W(`$m){ `$t=(Get-Date).ToString('HH:mm:ss'); Add-Content -Path `$log -Value "`$t `$m" }
-W '=== network bootstrap (specialize) ==='
+function W(`$m){ `$t=(Get-Date).ToString('yyyy-MM-dd HH:mm:ss'); Add-Content -Path `$log -Value "`$t  `$m" }
+W '=== network bootstrap (SetupComplete) ==='
 `$map = @{
 $mapLines
 }
+# Goal #5: identify node by Dell service tag
 `$tag = (Get-CimInstance -ClassName Win32_SystemEnclosure -ErrorAction SilentlyContinue).SerialNumber
 if (-not `$tag) { `$tag = (Get-CimInstance -ClassName Win32_BIOS -ErrorAction SilentlyContinue).SerialNumber }
 `$tag = "`$tag".Trim()
-W "Service tag: `$tag"
+W "Detected service tag: `$tag"
 `$cfg = `$map[`$tag]
 if (-not `$cfg) { W "No mapping for tag '`$tag' - leaving network unchanged."; exit 0 }
-W "Target host=`$(`$cfg.Name) ip=`$(`$cfg.Ip)"
-try { Rename-Computer -NewName `$cfg.Name -Force -ErrorAction Stop; W "Renamed -> `$(`$cfg.Name) (applies on reboot)" } catch { W "rename: `$(`$_.Exception.Message)" }
-`$ad = Get-NetAdapter -Name '$mgmtAdapterName' -ErrorAction SilentlyContinue
-if (-not `$ad) { `$ad = Get-NetAdapter | Where-Object { `$_.InterfaceDescription -match 'QL41232' -and `$_.Status -eq 'Up' } | Select-Object -First 1 }
-if (-not `$ad) { `$ad = Get-NetAdapter | Where-Object { `$_.Status -eq 'Up' -and `$_.Name -notmatch 'SLOT 2|Embedded' } | Select-Object -First 1 }
-if (-not `$ad) { W 'No management adapter found - abort network cfg.'; exit 0 }
-W "Adapter: `$(`$ad.Name)"
-try { Set-NetAdapterAdvancedProperty -Name `$ad.Name -DisplayName 'VLAN ID' -DisplayValue '$vlan' -ErrorAction Stop; W "VLAN ID = $vlan"; Start-Sleep -Seconds 5 } catch { W "vlan: `$(`$_.Exception.Message)" }
+W "Selected node config: Name=`$(`$cfg.Name) IP=`$(`$cfg.Ip) Mac=`$(`$cfg.Mac)"
+try { Rename-Computer -NewName `$cfg.Name -Force -ErrorAction Stop; W "Hostname -> `$(`$cfg.Name) (applies on reboot)" } catch { W "rename error: `$(`$_.Exception.Message)" }
+# Goal #3+#4: wait up to 5 min for NIC drivers, then deterministic adapter selection
+`$mgmtName = '$mgmtAdapterName'
+`$ad = `$null
+for (`$i=0; `$i -lt 30; `$i++) {
+  if (`$cfg.Mac) {
+    `$norm = (`$cfg.Mac -replace '[:\-\.]','').ToUpper()
+    `$ad = Get-NetAdapter -Physical -ErrorAction SilentlyContinue | Where-Object { (`$_.MacAddress -replace '[:\-\.]','').ToUpper() -eq `$norm } | Select-Object -First 1
+    if (`$ad) { W "Adapter matched by MAC `$(`$cfg.Mac): `$(`$ad.Name)" }
+  }
+  if (-not `$ad) { `$ad = Get-NetAdapter -Name `$mgmtName -ErrorAction SilentlyContinue | Where-Object { `$_.Status -eq 'Up' } | Select-Object -First 1 }
+  if (-not `$ad) { `$ad = Get-NetAdapter -ErrorAction SilentlyContinue | Where-Object { `$_.InterfaceDescription -match 'QL41232' -and `$_.Status -eq 'Up' -and `$_.Name -notmatch 'SLOT 2' } | Sort-Object Name | Select-Object -First 1 }
+  if (-not `$ad) { `$ad = Get-NetAdapter -ErrorAction SilentlyContinue | Where-Object { `$_.Status -eq 'Up' -and `$_.Name -notmatch 'SLOT 2|Embedded' } | Sort-Object Name | Select-Object -First 1 }
+  if (`$ad) { W "Management adapter after `$(`$i*10)s: `$(`$ad.Name) [`$(`$ad.InterfaceDescription)] MAC=`$(`$ad.MacAddress)"; break }
+  W "Attempt `$(`$i+1)/30: no suitable Up adapter yet; waiting 10s for NIC drivers..."
+  Start-Sleep -Seconds 10
+}
+if (-not `$ad) { W 'TIMEOUT: no management adapter after 5 minutes - abort network cfg.'; exit 0 }
+try { Set-NetAdapterAdvancedProperty -Name `$ad.Name -DisplayName 'VLAN ID' -DisplayValue '$vlan' -ErrorAction Stop; W "VLAN ID = $vlan"; Start-Sleep -Seconds 5 } catch { W "vlan error: `$(`$_.Exception.Message)" }
 `$ad  = Get-NetAdapter -Name `$ad.Name -ErrorAction SilentlyContinue
 `$idx = `$ad.InterfaceIndex
 try {
@@ -292,16 +333,31 @@ try {
   Remove-NetRoute -InterfaceIndex `$idx -DestinationPrefix '0.0.0.0/0' -Confirm:`$false -ErrorAction SilentlyContinue
   New-NetIPAddress -InterfaceIndex `$idx -IPAddress `$cfg.Ip -PrefixLength $MgmtPrefixLength -DefaultGateway '$gw' -ErrorAction Stop | Out-Null
   W "IP `$(`$cfg.Ip)/$MgmtPrefixLength gw $gw"
-} catch { W "ip: `$(`$_.Exception.Message)" }
-try { Set-DnsClientServerAddress -InterfaceIndex `$idx -ServerAddresses '$dns' -ErrorAction Stop; W "DNS $dns" } catch { W "dns: `$(`$_.Exception.Message)" }
-try { Enable-PSRemoting -Force -SkipNetworkProfileCheck -ErrorAction Stop; W 'PSRemoting enabled' } catch { W "psremoting: `$(`$_.Exception.Message)" }
-try { Set-NetConnectionProfile -InterfaceIndex `$idx -NetworkCategory Private -ErrorAction SilentlyContinue; W 'profile Private' } catch {}
+} catch { W "ip error: `$(`$_.Exception.Message)" }
+try { Set-DnsClientServerAddress -InterfaceIndex `$idx -ServerAddresses '$dns' -ErrorAction Stop; W "DNS $dns" } catch { W "dns error: `$(`$_.Exception.Message)" }
+try { Enable-PSRemoting -Force -SkipNetworkProfileCheck -ErrorAction Stop; W 'WinRM/PSRemoting enabled' } catch { W "winrm error: `$(`$_.Exception.Message)" }
+try { Set-NetConnectionProfile -InterfaceIndex `$idx -NetworkCategory Private -ErrorAction SilentlyContinue; W 'Network profile Private' } catch {}
 try {
   Set-ItemProperty 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name fDenyTSConnections -Value 0 -ErrorAction Stop
   Enable-NetFirewallRule -DisplayGroup 'Remote Desktop' -ErrorAction SilentlyContinue
   W 'RDP enabled'
-} catch { W "rdp: `$(`$_.Exception.Message)" }
-W 'network bootstrap done.'
+} catch { W "rdp error: `$(`$_.Exception.Message)" }
+# Goal #6: success marker
+try {
+  New-Item -ItemType Directory -Path 'C:\Bootstrap' -Force | Out-Null
+  `$stamp = (Get-Date).ToString('yyyy-MM-dd HH:mm:ss')
+  @(
+    "Timestamp   : `$stamp",
+    "Hostname    : `$(`$cfg.Name)",
+    "ServiceTag  : `$tag",
+    "AssignedIP  : `$(`$cfg.Ip)/$MgmtPrefixLength",
+    "MgmtAdapter : `$(`$ad.Name) [`$(`$ad.InterfaceDescription)] MAC=`$(`$ad.MacAddress)"
+  ) | Set-Content -Path 'C:\Bootstrap\success.txt' -Encoding ASCII
+  W 'Wrote C:\Bootstrap\success.txt'
+} catch { W "marker error: `$(`$_.Exception.Message)" }
+# Goal #7: final reboot so hostname + VLAN + profile settle
+W 'network bootstrap done; rebooting in 15s.'
+shutdown.exe /r /t 15 /c "zcoffee netbootstrap complete"
 exit 0
 "@
     # IMPORTANT: do NOT embed this script as a RunSynchronousCommand <Path> in the answer file.

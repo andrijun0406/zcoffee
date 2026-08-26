@@ -16,7 +16,6 @@
     reject the ENTIRE answer file (no Panther\unattend.xml, apply-phase error 0x80070001-0x4003x).
 
     Answer-file scope: locale, timezone, admin password. Disk selection is INTERACTIVE by default.
-    -AutoSelectBootDisk emits the EXPERIMENTAL WinPE RunSynchronous BOSS auto-partition step
     (validate before trusting it).
 
 .NOTES
@@ -31,9 +30,6 @@ param(
     [string]$Locale       = 'en-US',
     [string]$OwnerName    = 'Azure Local Lab',
     [string]$Organization = 'zcoffee',
-    [switch]$AutoSelectBootDisk,
-    [string]$BootDiskModelMatch = '(?i)boss',
-    [int]$BootDiskMaxSizeGB = 0,
     [switch]$AsIso,
     [string]$OutputIso   = (Join-Path $PSScriptRoot 'autounattend.iso'),
     [string]$OscdimgPath
@@ -70,69 +66,7 @@ if (@($issues).Count -gt 0) {
 $adminB64 = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($plain + 'AdministratorPassword'))
 $plain = $null
 
-$diskSetupXml = ''
-$imageInstallXml = ''
-if ($AutoSelectBootDisk) {
-    $ceiling = [int]$BootDiskMaxSizeGB
-    $rx = $BootDiskModelMatch
-    $peScript = @"
-`$ErrorActionPreference = 'Stop'
-`$log = "`$env:SystemDrive\Windows\Temp\bootdisk-select.log"
-function W(`$m){ `$t = (Get-Date).ToString('HH:mm:ss'); Add-Content -Path `$log -Value "`$t `$m"; Write-Host `$m }
-try {
-  `$rx = '$rx'
-  `$maxGb = $ceiling
-  `$all = Get-Disk | Where-Object { `$_.BusType -ne 'USB' }
-  foreach (`$d in `$all) { W ("disk {0}: '{1}' bus={2} size={3}GB" -f `$d.Number, `$d.FriendlyName, `$d.BusType, [math]::Round(`$d.Size/1GB)) }
-  `$cand = `$all | Where-Object { `$_.FriendlyName -match `$rx -or `$_.Model -match `$rx }
-  if (-not `$cand) {
-    W "No disk matched /`$rx/ by name; falling back to smallest fixed disk."
-    `$fixed = `$all | Where-Object { `$_.BusType -in 'SATA','RAID','NVMe','SAS' }
-    if (`$maxGb -gt 0) { `$fixed = `$fixed | Where-Object { `$_.Size -le (`$maxGb * 1GB) } }
-    if (`$fixed) { `$min = (`$fixed | Measure-Object -Property Size -Minimum).Minimum; `$cand = `$fixed | Where-Object { `$_.Size -eq `$min } }
-  }
-  `$n = @(`$cand).Count
-  if (`$n -ne 1) { W "AMBIGUOUS: `$n candidate disks - stopping so the operator selects manually."; exit 2 }
-  `$disk = `$cand[0]
-  W ("Selected BOSS boot disk {0}: '{1}' ({2}GB)" -f `$disk.Number, `$disk.FriendlyName, [math]::Round(`$disk.Size/1GB))
-  `$dp = @(
-    "select disk `$(`$disk.Number)","clean","convert gpt",
-    "create partition efi size=500","format fs=fat32 quick","assign letter=S",
-    "create partition msr size=16",
-    "create partition primary","format fs=ntfs quick label=Windows","assign letter=W","exit"
-  ) -join "``r``n"
-  `$dpf = "`$env:SystemDrive\Windows\Temp\boss-diskpart.txt"
-  Set-Content -Path `$dpf -Value `$dp -Encoding ASCII
-  W "Running diskpart to partition the BOSS disk..."
-  diskpart /s `$dpf | Out-Null
-  W "Boot disk prepared."
-  exit 0
-} catch { W ("ERROR: " + `$_.Exception.Message); exit 3 }
-"@
-    $peBytes = [Text.Encoding]::Unicode.GetBytes($peScript)
-    $peB64   = [Convert]::ToBase64String($peBytes)
-    $runCmd  = "cmd /c powershell.exe -NoProfile -ExecutionPolicy Bypass -EncodedCommand $peB64"
-    $imageInstallXml = @"
-      <ImageInstall>
-        <OSImage>
-          <InstallToAvailablePartition>true</InstallToAvailablePartition>
-        </OSImage>
-      </ImageInstall>
-"@
-    $diskSetupXml = @"
-      <RunSynchronous>
-        <RunSynchronousCommand wcm:action="add">
-          <Order>1</Order>
-          <Path>$runCmd</Path>
-          <Description>Auto-select and partition the BOSS boot VD</Description>
-          <WillReboot>Never</WillReboot>
-        </RunSynchronousCommand>
-      </RunSynchronous>
-"@
-    Write-Host 'Disk selection: AUTOMATIC (EXPERIMENTAL, unvalidated).' -ForegroundColor Yellow
-} else {
-    Write-Host 'Disk selection: INTERACTIVE (Setup pauses at the disk screen).' -ForegroundColor Yellow
-}
+Write-Host 'Disk selection: INTERACTIVE (operator picks BOSS at the disk screen). For AUTOMATIC BOSS selection use make-golden-with-unattend.ps1 -AutoSelectBootDisk (file-staged, schema-safe).' -ForegroundColor Yellow
 
 $xml = @"
 <?xml version="1.0" encoding="utf-8"?>
@@ -152,7 +86,7 @@ $xml = @"
     <component name="Microsoft-Windows-Setup"
                processorArchitecture="amd64"
                publicKeyToken="31bf3856ad364e35" language="neutral" versionScope="nonSxS">
-$imageInstallXml$diskSetupXml      <UserData>
+      <UserData>
         <AcceptEula>true</AcceptEula>
         <FullName>$OwnerName</FullName>
         <Organization>$Organization</Organization>
