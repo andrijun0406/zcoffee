@@ -1,0 +1,139 @@
+WinPE Boot-Disk Refactor Patch
+================================
+Target file : scripts/powershell/make-golden-with-unattend.ps1
+Purpose     : Replace PowerShell-based bootselect.ps1 (which cannot run - Azure
+              Local 24H2 Setup WinPE has no powershell.exe) with a native
+              cmd/wmic/diskpart bootselect.cmd staged at the ISO root.
+
+WHY
+---
+Verified on Dell PowerEdge R650 / Azure Local 24H2 media:
+  dir X:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe  -> File Not Found
+  cmd, wmic, diskpart, findstr, cscript  -> all present
+  wmic diskdrive where "model='DELLBOSS VD'" get index  -> returns 8 (deterministic)
+
+So the old RunSynchronous that invoked powershell.exe never executed
+(no bootdisk-select.log, disk screen appeared). The logic is now pure batch.
+
+APPLY
+-----
+This patch documents the three changed regions. The authoritative, fully
+updated file is provided alongside as make-golden-with-unattend.ps1 - drop it
+into scripts/powershell/, commit, and git pull on the jump host.
+
+Preserved unchanged (run post-install, PowerShell is available there):
+  SetupComplete.cmd, netbootstrap.ps1, networking/service-tag/MAC/WinRM/RDP.
+
+============================================================
+REGION 1 - WinPE bootselect.cmd generation (replaces the old $peScript / .ps1)
+Lines ~176-249
+============================================================
+    $rx = $BootDiskModelMatch
+    # PowerShell that runs INSIDE WinPE during Windows Setup (windowsPE pass).
+    # bootselect.cmd runs INSIDE Windows Setup WinPE, which has NO powershell.exe on Azure Local
+    # 24H2 media (verified on R650). It uses only cmd + wmic + diskpart, which ARE present.
+    # BOSS-S2 RAID1 enumerates deterministically as model 'DELLBOSS VD'.
+    $cmdScript = @"
+@echo off
+setlocal enabledelayedexpansion
+set "LOG=X:\bootdisk-select.log"
+echo ============================================================>> "%LOG%"
+echo [%DATE% %TIME%] bootselect.cmd START (cmd/wmic/diskpart - no PowerShell in WinPE)>> "%LOG%"
+
+rem --- Forensic: full disk inventory (once) so we can see how WinPE enumerates every device ---
+echo [%DATE% %TIME%] === DISK INVENTORY (wmic diskdrive get index,model,size,interfacetype) ===>> "%LOG%"
+wmic diskdrive get index,model,size,interfacetype >> "%LOG%" 2>&1
+echo [%DATE% %TIME%] === END DISK INVENTORY ===>> "%LOG%"
+
+rem --- Detect the BOSS boot VD by exact model. Require EXACTLY one. Never guess. ---
+set "BOSS_INDEX="
+set /a BOSS_COUNT=0
+for /f %%i in ('wmic diskdrive where "model='DELLBOSS VD'" get index ^| findstr /r "^[0-9]"') do (
+    set /a BOSS_INDEX=%%i 2>nul
+    set /a BOSS_COUNT+=1
+)
+echo [%DATE% %TIME%] BOSS 'DELLBOSS VD' disks found: !BOSS_COUNT!   index: !BOSS_INDEX!>> "%LOG%"
+
+if "!BOSS_COUNT!"=="0" (
+    echo [%DATE% %TIME%] RESULT: no DELLBOSS VD detected - NOT partitioning. Setup will show the disk screen; operator selects BOSS manually. Never guessing.>> "%LOG%"
+    endlocal ^& exit /b 0
+)
+if not "!BOSS_COUNT!"=="1" (
+    echo [%DATE% %TIME%] RESULT: multiple DELLBOSS VD detected (!BOSS_COUNT!) - AMBIGUOUS, NOT partitioning. Operator selects manually. Never guessing.>> "%LOG%"
+    endlocal ^& exit /b 0
+)
+
+rem --- Exactly one BOSS: generate the diskpart script ---
+set "DP=X:\boss.txt"
+> "%DP%" echo select disk !BOSS_INDEX!
+>> "%DP%" echo clean
+>> "%DP%" echo convert gpt
+>> "%DP%" echo create partition efi size=500
+>> "%DP%" echo format fs=fat32 quick
+>> "%DP%" echo assign letter=S
+>> "%DP%" echo create partition msr size=16
+>> "%DP%" echo create partition primary
+>> "%DP%" echo format fs=ntfs quick label=Windows
+>> "%DP%" echo assign letter=W
+>> "%DP%" echo exit
+
+echo [%DATE% %TIME%] === GENERATED DISKPART SCRIPT (%DP%) ===>> "%LOG%"
+type "%DP%" >> "%LOG%" 2>&1
+echo [%DATE% %TIME%] SELECTED DISK NUMBER: !BOSS_INDEX!>> "%LOG%"
+echo [%DATE% %TIME%] Running diskpart to clean + partition the BOSS disk...>> "%LOG%"
+diskpart /s "%DP%" >> "%LOG%" 2>&1
+echo [%DATE% %TIME%] diskpart exit code: !ERRORLEVEL!>> "%LOG%"
+
+rem --- Validate: capture list disk / list volume after partitioning ---
+set "VF=X:\verify.txt"
+> "%VF%" echo list disk
+>> "%VF%" echo list volume
+>> "%VF%" echo exit
+echo [%DATE% %TIME%] === POST-DISKPART INVENTORY (list disk / list volume) ===>> "%LOG%"
+diskpart /s "%VF%" >> "%LOG%" 2>&1
+echo [%DATE% %TIME%] === END POST-DISKPART INVENTORY ===>> "%LOG%"
+echo [%DATE% %TIME%] Boot disk prepared on disk !BOSS_INDEX! (EFI=S: MSR Windows=W:). Done.>> "%LOG%"
+endlocal ^& exit /b 0
+"@
+    # WinPE on Azure Local media has NO powershell.exe, so the disk logic is a cmd/wmic/diskpart
+    # script staged at the ISO root. The RunSynchronous Path stays SHORT (well under the 259-char
+    # unattend schema limit) by only searching media drive letters and calling bootselect.cmd.
+    $script:StageBootSelect  = $true
+    $script:BootSelectScript = $cmdScript
+    $runCmd = 'cmd /c for %d in (C D E F G H I J) do @if exist %d:\bootselect.cmd call %d:\bootselect.cmd'
+    $diskSetupXml = @"
+      <RunSynchronous>
+
+============================================================
+REGION 2 - Staging: write bootselect.cmd at the ISO root as ASCII (no BOM)
+Lines ~515-523
+============================================================
+    }
+
+    # --- Auto-select disk: stage bootselect.cmd at the ISO ROOT (invoked by the short WinPE Path) ---
+    # ASCII (no BOM) - a UTF-8 BOM breaks '@echo off' parsing in cmd.
+    if ($script:StageBootSelect) {
+        $bsPath = Join-Path $StagingDir 'bootselect.cmd'
+        Set-Content -LiteralPath $bsPath -Value $script:BootSelectScript -Encoding ASCII
+        Write-Step "Auto-select staged: bootselect.cmd at ISO root (cmd/wmic/diskpart, runs in WinPE without PowerShell)." 'Green'
+    }
+
+============================================================
+KEY POINTS
+============================================================
+1. RunSynchronous Path (92 chars, under the 259 schema limit):
+   cmd /c for %d in (C D E F G H I J) do @if exist %d:\bootselect.cmd call %d:\bootselect.cmd
+
+2. bootselect.cmd is written with -Encoding ASCII (a UTF-8 BOM breaks '@echo off').
+
+3. Detection: wmic diskdrive where "model='DELLBOSS VD'" get index, filtered by
+   findstr "^[0-9]"; set /a strips WMIC's trailing CR; a counter enforces EXACTLY ONE.
+   0 or >1 matches -> log reason, do NOT partition, exit /b 0 (Setup shows the
+   manual disk picker; never guesses, never touches a data disk).
+
+4. Logs to X:\bootdisk-select.log: start timestamp, full wmic inventory,
+   detected index, generated diskpart script, diskpart exit code, and
+   post-partition list disk / list volume.
+
+5. InstallToAvailablePartition=true retained so Setup installs to the W:
+   partition bootselect.cmd creates.
