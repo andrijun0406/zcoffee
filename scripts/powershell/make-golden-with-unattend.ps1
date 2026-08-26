@@ -194,10 +194,10 @@ rem --- Detect the BOSS boot VD by exact model. Require EXACTLY one. Never guess
 set "BOSS_INDEX="
 set /a BOSS_COUNT=0
 rem WinPE has no findstr - parse WMIC directly. skip=1 drops the 'Index' header;
-rem blank/whitespace lines are ignored; set /a strips WMIC's trailing CR and forces numeric.
+rem blank/whitespace lines are ignored; for /f tokens=1 splits off WMIC's trailing CR.
 for /f "skip=1 tokens=1" %%i in ('wmic diskdrive where "model='DELLBOSS VD'" get index') do (
     if not "%%i"=="" (
-        set /a BOSS_INDEX=%%i 2>nul
+        set "BOSS_INDEX=%%i"
         set /a BOSS_COUNT+=1
     )
 )
@@ -205,11 +205,11 @@ echo [%DATE% %TIME%] BOSS 'DELLBOSS VD' disks found: !BOSS_COUNT!   index: !BOSS
 
 if "!BOSS_COUNT!"=="0" (
     echo [%DATE% %TIME%] RESULT: no DELLBOSS VD detected - NOT partitioning. Setup will show the disk screen; operator selects BOSS manually. Never guessing.>> "%LOG%"
-    endlocal ^& exit /b 10
+    endlocal ^& exit /b 0
 )
 if not "!BOSS_COUNT!"=="1" (
     echo [%DATE% %TIME%] RESULT: multiple DELLBOSS VD detected (!BOSS_COUNT!) - AMBIGUOUS, NOT partitioning. Operator selects manually. Never guessing.>> "%LOG%"
-    endlocal ^& exit /b 11
+    endlocal ^& exit /b 0
 )
 
 rem --- Exactly one BOSS: re-confirm and log the exact device before touching it ---
