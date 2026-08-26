@@ -65,7 +65,7 @@ param(
     # 960 GB (R670 BOSS-N1), or any other size. No per-model size needs to be configured.
     [switch]$AutoSelectBootDisk,                 # opt IN to EXPERIMENTAL WinPE auto BOSS selection (default: interactive)
     [string]$BootDiskModelMatch = '(?i)boss',    # regex matched against disk FriendlyName/Model to find BOSS
-    [int]$BootDiskMaxSizeGB = 700,                # ceiling (GB) for the SIZE-FALLBACK guess only; identity-matched BOSS is trusted at any size (R650 BOSS-S2 ~223GB, R670 BOSS-N1 ~960GB). R650 lab: BOSS~223, cacheSSD~800, HDD~2.4TB
+    [int]$BootDiskMaxSizeGB = 0,                  # 0 = UNLIMITED (default). Ceiling (GB) guards the SIZE-FALLBACK guess ONLY; identity-matched BOSS is always trusted at any size (BOSS-S2 ~223GB, BOSS-N1 ~960GB, future 1.92TB, etc.). Set >0 only to bound the fallback path.
 
     # --- Bake per-node network + remote access into the answer file (specialize pass) ---
     # Each node self-configures by reading its Dell service tag and matching lab-config.psd1:
@@ -172,7 +172,7 @@ $imageInstallXml = ''
 $script:StageBootSelect = $false
 $script:BootSelectScript = ''
 if ($AutoSelectBootDisk) {
-    $ceiling = if ([int]$BootDiskMaxSizeGB -gt 0) { [int]$BootDiskMaxSizeGB } else { 700 }
+    $ceiling = [int]$BootDiskMaxSizeGB   # 0 = unlimited; only bounds the fallback guess when > 0
     $rx = $BootDiskModelMatch
     # PowerShell that runs INSIDE WinPE during Windows Setup (windowsPE pass).
     $peScript = @"
@@ -208,18 +208,19 @@ try {
   # (Priority 1) is trusted at ANY size - R650 BOSS-S2 ~223GB, R670 BOSS-N1 ~960GB, etc.
   `$fromIdentity = [bool]`$cand
   if (-not `$cand) {
-    W "Priority2 no BOSS identity; smallest local fixed-disk fallback (ceiling `$maxGb GB applies)."
-    `$fixed = `$all | Where-Object { `$_.BusType -in 'SATA','RAID','NVMe','SAS','ATA' -and (`$_.Size/1GB) -le `$maxGb }
+    `$capMsg = if (`$maxGb -gt 0) { "ceiling `$maxGb GB" } else { "no ceiling (unlimited)" }
+    W ("Priority2 no BOSS identity; smallest local fixed-disk fallback (`$capMsg).")
+    `$fixed = `$all | Where-Object { `$_.BusType -in 'SATA','RAID','NVMe','SAS','ATA' -and (`$maxGb -le 0 -or (`$_.Size/1GB) -le `$maxGb) }
     if (`$fixed) { `$min = (`$fixed | Measure-Object -Property Size -Minimum).Minimum; `$cand = `$fixed | Where-Object { `$_.Size -eq `$min } }
   }
   # --- Priority 3: safety - never an S2D pool member; ceiling applies to the FALLBACK ONLY; require EXACTLY one ---
   `$cand = @(`$cand | Where-Object { `$pooledUids -notcontains `$_.UniqueId })
-  if (-not `$fromIdentity) { `$cand = @(`$cand | Where-Object { (`$_.Size/1GB) -le `$maxGb }) }
+  if ((-not `$fromIdentity) -and (`$maxGb -gt 0)) { `$cand = @(`$cand | Where-Object { (`$_.Size/1GB) -le `$maxGb }) }
   foreach (`$c in `$cand) { W ("Priority3 valid candidate: disk {0} '{1}' {2}GB (identityMatch=`$fromIdentity)" -f `$c.Number,`$c.FriendlyName,[math]::Round(`$c.Size/1GB)) }
   `$n = @(`$cand).Count
   if (`$n -ne 1) { W ("AMBIGUOUS/NONE: `$n candidate disk(s) after safety filters - STOP; operator selects manually. Never guessing."); exit 2 }
   `$disk = `$cand[0]
-  if ((-not `$fromIdentity) -and ((`$disk.Size/1GB) -gt `$maxGb)) { W ("SAFETY: fallback disk exceeds `$maxGb GB - refusing."); exit 4 }
+  if ((-not `$fromIdentity) -and (`$maxGb -gt 0) -and ((`$disk.Size/1GB) -gt `$maxGb)) { W ("SAFETY: fallback disk exceeds `$maxGb GB - refusing."); exit 4 }
   W ("Selected BOSS boot disk {0}: '{1}' ({2}GB, bus={3})" -f `$disk.Number,`$disk.FriendlyName,[math]::Round(`$disk.Size/1GB),`$disk.BusType)
   `$dp = @(
     "select disk `$(`$disk.Number)","clean","convert gpt",
@@ -229,8 +230,11 @@ try {
   ) -join "``r``n"
   `$dpf = "`$env:SystemDrive\Windows\Temp\boss-diskpart.txt"
   Set-Content -Path `$dpf -Value `$dp -Encoding ASCII
+  W ("SELECTED DISK NUMBER: {0}" -f `$disk.Number)
+  W ("SELECTED DISK SIZE: {0} GB" -f [math]::Round(`$disk.Size/1GB))
   W 'Running diskpart to partition the BOSS disk...'
   diskpart /s `$dpf | Out-Null
+  try { Get-Partition -DiskNumber `$disk.Number -ErrorAction SilentlyContinue | ForEach-Object { W ("Partition created: type={0} size={1}MB drive={2}" -f `$_.Type,[math]::Round(`$_.Size/1MB),`$_.DriveLetter) } } catch { W 'Get-Partition post-diskpart failed (non-fatal).' }
   W 'Boot disk prepared.'
   exit 0
 } catch { W ('ERROR: ' + `$_.Exception.Message); exit 3 }
@@ -319,13 +323,20 @@ for (`$i=0; `$i -lt 30; `$i++) {
   }
   if (-not `$ad) { `$ad = Get-NetAdapter -Name `$mgmtName -ErrorAction SilentlyContinue | Where-Object { `$_.Status -eq 'Up' } | Select-Object -First 1 }
   if (-not `$ad) { `$ad = Get-NetAdapter -ErrorAction SilentlyContinue | Where-Object { `$_.InterfaceDescription -match 'QL41232' -and `$_.Status -eq 'Up' -and `$_.Name -notmatch 'SLOT 2' } | Sort-Object Name | Select-Object -First 1 }
-  if (-not `$ad) { `$ad = Get-NetAdapter -ErrorAction SilentlyContinue | Where-Object { `$_.Status -eq 'Up' -and `$_.Name -notmatch 'SLOT 2|Embedded' } | Sort-Object Name | Select-Object -First 1 }
   if (`$ad) { W "Management adapter after `$(`$i*10)s: `$(`$ad.Name) [`$(`$ad.InterfaceDescription)] MAC=`$(`$ad.MacAddress)"; break }
   W "Attempt `$(`$i+1)/30: no suitable Up adapter yet; waiting 10s for NIC drivers..."
   Start-Sleep -Seconds 10
 }
-if (-not `$ad) { W 'TIMEOUT: no management adapter after 5 minutes - abort network cfg.'; exit 0 }
-try { Set-NetAdapterAdvancedProperty -Name `$ad.Name -DisplayName 'VLAN ID' -DisplayValue '$vlan' -ErrorAction Stop; W "VLAN ID = $vlan"; Start-Sleep -Seconds 5 } catch { W "vlan error: `$(`$_.Exception.Message)" }
+if (-not `$ad) { W 'TIMEOUT/AMBIGUOUS: could not uniquely identify the management adapter (MAC / configured name / QL41232-not-SLOT2) after 5 minutes. NOT guessing - leaving network unconfigured. Set MgmtMac in lab-config.psd1.'; exit 5 }
+try { Get-NetAdapterAdvancedProperty -Name `$ad.Name -ErrorAction SilentlyContinue | ForEach-Object { W ("advprop: '`$(`$_.DisplayName)' = '`$(`$_.DisplayValue)' reg=`$(`$_.RegistryKeyword)") } } catch { }
+`$vlanSet = `$false
+foreach (`$vn in @('VLAN ID','VLAN','Port VLAN ID','802.1Q VLAN ID','VLAN Id')) {
+  try { Set-NetAdapterAdvancedProperty -Name `$ad.Name -DisplayName `$vn -DisplayValue '$vlan' -ErrorAction Stop; W "VLAN set via '`$vn' = $vlan"; `$vlanSet = `$true; Start-Sleep -Seconds 5; break } catch { }
+}
+if (-not `$vlanSet) {
+  foreach (`$rk in @('VlanId','VLANID')) { try { Set-NetAdapterAdvancedProperty -Name `$ad.Name -RegistryKeyword `$rk -RegistryValue '$vlan' -ErrorAction Stop; W "VLAN set via registry keyword '`$rk' = $vlan"; `$vlanSet = `$true; Start-Sleep -Seconds 5; break } catch { } }
+}
+if (-not `$vlanSet) { W 'WARN: could not set VLAN via any known advanced-property/registry name; see advprop log lines above. Network may be on the wrong VLAN.' }
 `$ad  = Get-NetAdapter -Name `$ad.Name -ErrorAction SilentlyContinue
 `$idx = `$ad.InterfaceIndex
 try {
