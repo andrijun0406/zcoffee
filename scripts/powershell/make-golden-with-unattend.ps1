@@ -175,82 +175,77 @@ if ($AutoSelectBootDisk) {
     $ceiling = [int]$BootDiskMaxSizeGB   # 0 = unlimited; only bounds the fallback guess when > 0
     $rx = $BootDiskModelMatch
     # PowerShell that runs INSIDE WinPE during Windows Setup (windowsPE pass).
-    $peScript = @"
-`$ErrorActionPreference = 'Stop'
-`$log = "`$env:SystemDrive\Windows\Temp\bootdisk-select.log"
-function W(`$m){ `$t=(Get-Date).ToString('yyyy-MM-dd HH:mm:ss'); Add-Content -Path `$log -Value "`$t  `$m"; Write-Host `$m }
-try {
-  `$maxGb = $ceiling
-  # BOSS identity indicators (case-insensitive). Broader than a single 'boss' token so it also
-  # catches 'Boot Optimized Storage', 'Dell BOSS', 'Dell BOSS-N1', 'Dell BOSS-S2', etc.
-  `$idPatterns = @('$rx','boot optimized storage','dell boss','boss-n','boss-s')
-  # Forensic dump: full Get-Disk properties (once) so we can see exactly how Azure Local WinPE
-  # enumerates the BOSS-S2 VD vs cache SSD vs capacity HDD on this platform.
-  W '=== FULL DISK INVENTORY (Get-Disk | Format-List *) ==='
-  try { Get-Disk | Format-List * | Out-String -Width 400 | ForEach-Object { `$_.Split("`n") } | ForEach-Object { if (`$_.Trim()) { W `$_.TrimEnd() } } } catch { W ("disk inventory error: " + `$_.Exception.Message) }
-  W '=== END FULL DISK INVENTORY ==='
-  # Exclude removable buses (USB/SD/MMC) up front.
-  `$all = Get-Disk | Where-Object { `$_.BusType -notin 'USB','SD','MMC' }
-  foreach (`$d in `$all) {
-    W ("disk {0}: name='{1}' model='{2}' bus={3} size={4}GB sn='{5}' path='{6}' loc='{7}' uid='{8}'" -f `$d.Number,`$d.FriendlyName,`$d.Model,`$d.BusType,[math]::Round(`$d.Size/1GB),`$d.SerialNumber,`$d.Path,`$d.Location,`$d.UniqueId)
-  }
-  # Disks already in an EXISTING (non-primordial) storage pool are S2D data devices - never touch them.
-  # In a clean WinPE there is usually no pool, so this list is empty; on a re-image it protects data disks.
-  `$pooledUids = @()
-  try {
-    `$pools = Get-StoragePool -IsPrimordial `$false -ErrorAction SilentlyContinue
-    foreach (`$p in `$pools) { `$pooledUids += (Get-PhysicalDisk -StoragePool `$p -ErrorAction SilentlyContinue | Select-Object -ExpandProperty UniqueId -ErrorAction SilentlyContinue) }
-    if (@(`$pooledUids).Count) { W ("Excluding existing-pool (S2D) disks: {0}" -f (`$pooledUids -join ',')) }
-  } catch { }
-  # --- Priority 1: BOSS identity across FriendlyName/Model/SerialNumber/Location/Path/UniqueId ---
-  `$cand = `$all | Where-Object {
-    `$f = "{0} {1} {2} {3} {4} {5}" -f `$_.FriendlyName,`$_.Model,`$_.SerialNumber,`$_.Location,`$_.Path,`$_.UniqueId
-    `$hit = `$false; foreach (`$p in `$idPatterns) { if (`$f -match `$p) { `$hit = `$true } }; `$hit
-  }
-  if (`$cand) { W ("Priority1 BOSS identity match: {0} candidate(s)" -f @(`$cand).Count) }
-  # --- Priority 2: fallback to smallest local FIXED disk (USB/SD/MMC already excluded) ---
-  # IMPORTANT: the size ceiling ONLY guards this GUESS path. A positively identified BOSS
-  # (Priority 1) is trusted at ANY size - R650 BOSS-S2 ~223GB, R670 BOSS-N1 ~960GB, etc.
-  `$fromIdentity = [bool]`$cand
-  if (-not `$cand) {
-    `$capMsg = if (`$maxGb -gt 0) { "ceiling `$maxGb GB" } else { "no ceiling (unlimited)" }
-    W ("Priority2 no BOSS identity; smallest local fixed-disk fallback (`$capMsg).")
-    `$fixed = `$all | Where-Object { `$_.BusType -in 'SATA','RAID','NVMe','SAS','ATA' -and (`$maxGb -le 0 -or (`$_.Size/1GB) -le `$maxGb) }
-    if (`$fixed) { `$min = (`$fixed | Measure-Object -Property Size -Minimum).Minimum; `$cand = `$fixed | Where-Object { `$_.Size -eq `$min } }
-  }
-  # --- Priority 3: safety - never an S2D pool member; ceiling applies to the FALLBACK ONLY; require EXACTLY one ---
-  `$cand = @(`$cand | Where-Object { `$pooledUids -notcontains `$_.UniqueId })
-  if ((-not `$fromIdentity) -and (`$maxGb -gt 0)) { `$cand = @(`$cand | Where-Object { (`$_.Size/1GB) -le `$maxGb }) }
-  foreach (`$c in `$cand) { W ("Priority3 valid candidate: disk {0} '{1}' {2}GB (identityMatch=`$fromIdentity)" -f `$c.Number,`$c.FriendlyName,[math]::Round(`$c.Size/1GB)) }
-  `$n = @(`$cand).Count
-  if (`$n -ne 1) { W ("AMBIGUOUS/NONE: `$n candidate disk(s) after safety filters - STOP; operator selects manually. Never guessing."); exit 2 }
-  `$disk = `$cand[0]
-  if ((-not `$fromIdentity) -and (`$maxGb -gt 0) -and ((`$disk.Size/1GB) -gt `$maxGb)) { W ("SAFETY: fallback disk exceeds `$maxGb GB - refusing."); exit 4 }
-  W ("Selected BOSS boot disk {0}: '{1}' ({2}GB, bus={3})" -f `$disk.Number,`$disk.FriendlyName,[math]::Round(`$disk.Size/1GB),`$disk.BusType)
-  `$dp = @(
-    "select disk `$(`$disk.Number)","clean","convert gpt",
-    "create partition efi size=500","format fs=fat32 quick","assign letter=S",
-    "create partition msr size=16",
-    "create partition primary","format fs=ntfs quick label=Windows","assign letter=W","exit"
-  ) -join "``r``n"
-  `$dpf = "`$env:SystemDrive\Windows\Temp\boss-diskpart.txt"
-  Set-Content -Path `$dpf -Value `$dp -Encoding ASCII
-  W ("SELECTED DISK NUMBER: {0}" -f `$disk.Number)
-  W ("SELECTED DISK SIZE: {0} GB" -f [math]::Round(`$disk.Size/1GB))
-  W 'Running diskpart to partition the BOSS disk...'
-  diskpart /s `$dpf | Out-Null
-  try { Get-Partition -DiskNumber `$disk.Number -ErrorAction SilentlyContinue | ForEach-Object { W ("Partition created: type={0} size={1}MB drive={2}" -f `$_.Type,[math]::Round(`$_.Size/1MB),`$_.DriveLetter) } } catch { W 'Get-Partition post-diskpart failed (non-fatal).' }
-  W 'Boot disk prepared.'
-  exit 0
-} catch { W ('ERROR: ' + `$_.Exception.Message); exit 3 }
+    # bootselect.cmd runs INSIDE Windows Setup WinPE, which has NO powershell.exe on Azure Local
+    # 24H2 media (verified on R650). It uses only cmd + wmic + diskpart, which ARE present.
+    # BOSS-S2 RAID1 enumerates deterministically as model 'DELLBOSS VD'.
+    $cmdScript = @"
+@echo off
+setlocal enabledelayedexpansion
+set "LOG=X:\bootdisk-select.log"
+echo ============================================================>> "%LOG%"
+echo [%DATE% %TIME%] bootselect.cmd START (cmd/wmic/diskpart - no PowerShell in WinPE)>> "%LOG%"
+
+rem --- Forensic: full disk inventory (once) so we can see how WinPE enumerates every device ---
+echo [%DATE% %TIME%] === DISK INVENTORY (wmic diskdrive get index,model,size,interfacetype) ===>> "%LOG%"
+wmic diskdrive get index,model,size,interfacetype >> "%LOG%" 2>&1
+echo [%DATE% %TIME%] === END DISK INVENTORY ===>> "%LOG%"
+
+rem --- Detect the BOSS boot VD by exact model. Require EXACTLY one. Never guess. ---
+set "BOSS_INDEX="
+set /a BOSS_COUNT=0
+for /f %%i in ('wmic diskdrive where "model='DELLBOSS VD'" get index ^| findstr /r "^[0-9]"') do (
+    set /a BOSS_INDEX=%%i 2>nul
+    set /a BOSS_COUNT+=1
+)
+echo [%DATE% %TIME%] BOSS 'DELLBOSS VD' disks found: !BOSS_COUNT!   index: !BOSS_INDEX!>> "%LOG%"
+
+if "!BOSS_COUNT!"=="0" (
+    echo [%DATE% %TIME%] RESULT: no DELLBOSS VD detected - NOT partitioning. Setup will show the disk screen; operator selects BOSS manually. Never guessing.>> "%LOG%"
+    endlocal ^& exit /b 0
+)
+if not "!BOSS_COUNT!"=="1" (
+    echo [%DATE% %TIME%] RESULT: multiple DELLBOSS VD detected (!BOSS_COUNT!) - AMBIGUOUS, NOT partitioning. Operator selects manually. Never guessing.>> "%LOG%"
+    endlocal ^& exit /b 0
+)
+
+rem --- Exactly one BOSS: generate the diskpart script ---
+set "DP=X:\boss.txt"
+> "%DP%" echo select disk !BOSS_INDEX!
+>> "%DP%" echo clean
+>> "%DP%" echo convert gpt
+>> "%DP%" echo create partition efi size=500
+>> "%DP%" echo format fs=fat32 quick
+>> "%DP%" echo assign letter=S
+>> "%DP%" echo create partition msr size=16
+>> "%DP%" echo create partition primary
+>> "%DP%" echo format fs=ntfs quick label=Windows
+>> "%DP%" echo assign letter=W
+>> "%DP%" echo exit
+
+echo [%DATE% %TIME%] === GENERATED DISKPART SCRIPT (%DP%) ===>> "%LOG%"
+type "%DP%" >> "%LOG%" 2>&1
+echo [%DATE% %TIME%] SELECTED DISK NUMBER: !BOSS_INDEX!>> "%LOG%"
+echo [%DATE% %TIME%] Running diskpart to clean + partition the BOSS disk...>> "%LOG%"
+diskpart /s "%DP%" >> "%LOG%" 2>&1
+echo [%DATE% %TIME%] diskpart exit code: !ERRORLEVEL!>> "%LOG%"
+
+rem --- Validate: capture list disk / list volume after partitioning ---
+set "VF=X:\verify.txt"
+> "%VF%" echo list disk
+>> "%VF%" echo list volume
+>> "%VF%" echo exit
+echo [%DATE% %TIME%] === POST-DISKPART INVENTORY (list disk / list volume) ===>> "%LOG%"
+diskpart /s "%VF%" >> "%LOG%" 2>&1
+echo [%DATE% %TIME%] === END POST-DISKPART INVENTORY ===>> "%LOG%"
+echo [%DATE% %TIME%] Boot disk prepared on disk !BOSS_INDEX! (EFI=S: MSR Windows=W:). Done.>> "%LOG%"
+endlocal ^& exit /b 0
 "@
-    # The unattend schema limits RunSynchronousCommand/Path to 259 chars. A base64 -EncodedCommand
-    # of this script is multi-KB and exceeds it, which makes Setup reject the ENTIRE answer file
-    # (0x80220005 "Value is invalid"). So stage the script as a file at the ISO root and invoke it
-    # with a SHORT Path that searches the media drive letters from within WinPE.
+    # WinPE on Azure Local media has NO powershell.exe, so the disk logic is a cmd/wmic/diskpart
+    # script staged at the ISO root. The RunSynchronous Path stays SHORT (well under the 259-char
+    # unattend schema limit) by only searching media drive letters and calling bootselect.cmd.
     $script:StageBootSelect  = $true
-    $script:BootSelectScript = $peScript
-    $runCmd = 'cmd /c for %d in (C D E F G H I J) do @if exist %d:\bootselect.ps1 powershell -NoProfile -ExecutionPolicy Bypass -File %d:\bootselect.ps1'
+    $script:BootSelectScript = $cmdScript
+    $runCmd = 'cmd /c for %d in (C D E F G H I J) do @if exist %d:\bootselect.cmd call %d:\bootselect.cmd'
     $diskSetupXml = @"
       <RunSynchronous>
         <RunSynchronousCommand wcm:action="add">
@@ -519,11 +514,12 @@ try {
         Write-Step "Network bake staged via `$OEM`$: SetupComplete.cmd + netbootstrap.ps1 (runs post-setup, no answer-file length limit)." 'Green'
     }
 
-    # --- Auto-select disk: stage bootselect.ps1 at the ISO ROOT (invoked by the short WinPE Path) ---
+    # --- Auto-select disk: stage bootselect.cmd at the ISO ROOT (invoked by the short WinPE Path) ---
+    # ASCII (no BOM) - a UTF-8 BOM breaks '@echo off' parsing in cmd.
     if ($script:StageBootSelect) {
-        $bsPath = Join-Path $StagingDir 'bootselect.ps1'
-        Set-Content -LiteralPath $bsPath -Value $script:BootSelectScript -Encoding UTF8
-        Write-Step "Auto-select staged: bootselect.ps1 at ISO root (short Path invokes it in WinPE)." 'Green'
+        $bsPath = Join-Path $StagingDir 'bootselect.cmd'
+        Set-Content -LiteralPath $bsPath -Value $script:BootSelectScript -Encoding ASCII
+        Write-Step "Auto-select staged: bootselect.cmd at ISO root (cmd/wmic/diskpart, runs in WinPE without PowerShell)." 'Green'
     }
 
     # --- Dismount the source ISO (no longer needed once copied) ---
