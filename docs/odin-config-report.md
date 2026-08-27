@@ -33,8 +33,8 @@
 
 | Port | Speed | RDMA |
 |------|-------|------|
-| Integrated NIC1 Port 1-1 | 25GbE | No |
-| Integrated NIC1 Port 2-1 | 25GbE | No |
+| Integrated NIC 1 Port 1-1 | 10GbE | No |
+| Integrated NIC 1 Port 2-1 | 10GbE | No |
 | SLOT 2 Port 1 | 25GbE | Yes |
 | SLOT 2 Port 2 | 25GbE | Yes |
 

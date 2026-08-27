@@ -1,185 +1,64 @@
 # Troubleshooting
 
-Each stage writes a timestamped log to `logs/<stage>-<yyyyMMdd-HHmmss>.log` and shows `[OK]/[INFO]/[WARN]/[ERR]` lines. Start troubleshooting from the failing step reported by the dashboard.
+Symptom -> cause -> fix, drawn from real Jakarta 01 deployment. For the full narrative see
+`deployment-journey.md`.
 
-## Stage 1 — OS deployment
+## Quick reference
+
 | Symptom | Likely cause | Fix |
-|---------|--------------|-----|
-| **Golden ISO won't boot; F11 shows "Virtual Network File 2" but NOT "Virtual Network File 1"** | **A second RFS image is mounted** (`remoteimage2`, e.g. a separate Autounattend ISO). On R650 BIOS 1.12.1 this stops the golden ISO on RFS1 from enumerating as bootable. **This was the true root cause** behind the repeated boot failures. | Mount ONLY the golden ISO (single RFS). Bake the answer file into the golden ISO with `make-golden-with-unattend.ps1`. See below. |
-| "ISO server not reachable" | Bound to loopback/wildcard, or firewall | Pass a reachable `-HttpHost` (e.g. `10.8.230.225`); allow TCP 8080 to both iDRACs |
-| RACADM "not found" | RACADM not on PATH | Install Dell iDRAC Tools or pass `-RACADMPath` |
-| iDRAC connect fails | Wrong iDRAC IP/creds or HTTPS blocked | Verify iDRAC `10.8.230.84` / `10.8.230.86`, port 443, credentials |
-| remoteimage fails | iDRAC can't reach the ISO URL | Confirm both iDRACs reach `http://<HttpHost>:8080/...` |
-| **`RAC0718: Remote File Share service is busy`** | A prior `remoteimage` connect half-opened (usually **inbound TCP 8080 blocked** on this PC) and wedged the RFS service | Add the inbound 8080 rule (below); then `remoteimage -d` both slots, and if still stuck `racadm ... racreset soft`. See below. |
-| **`ERROR: Unable to perform requested operation`** on mount | Stale RFS session still detaching, or 8080 blocked so the connect can't complete | Ensure inbound TCP 8080 is allowed; worker now waits for `Disabled` and retries |
-| Node won't boot installer | Boot device/BOSS not ready | Use `-StartInstallation`; recreate the BOSS VD with `-RecreateBossVd` |
-| **"Boot Failed: Virtual Optical Drive"** even from manual F11 | **Secure Boot enabled on old BIOS** — the cert store rejects the newly-signed Golden Image bootloader | Disable Secure Boot (`-DisableSecureBoot`), install, then update BIOS and re-enable (`-EnableSecureBoot`). See below. |
-| Node boots to PXE instead of the ISO | One-time boot override unreliable on old BIOS | Update BIOS; or press F11 → One-shot UEFI Boot Menu → Virtual Optical Drive |
-| BOSS "fewer than 2 physical disks" | (fixed) parser now reads `Disk.Direct` AHCI disks | Ensure you're on the current `prepare-hardware.ps1` |
-| Setup asks for a "media driver" mid-install | ISO was detached while installing | Never run a second (mount-only) bootstrap during an install — it detaches media on all targeted nodes. Re-run `-OnlyNode <n> -StartInstallation` |
-| Auto disk-select stopped; Setup shows the disk screen | BOSS detection was ambiguous (0 or >1 candidates) — the safety guard halted before touching any disk | Check `%SystemDrive%\Windows\Temp\bootdisk-select.log` in WinPE (Shift+F10); pick BOSS manually, or tune `-BootDiskModelMatch` / `-BootDiskMaxSizeGB` when rebuilding the ISO |
-| Install landed on the wrong disk | A non-BOSS disk had a Windows-eligible partition and was picked by `InstallToAvailablePartition` | On HCI nodes only BOSS should hold a Windows partition; recreate the BOSS VD (`-RecreateBossVd`) and ensure S2D disks are clean, or rebuild the ISO with `-InteractiveDiskSelect` |
-| ISO hash mismatch | Wrong or corrupt ISO | Re-download the Dell Golden Image; verify `-ExpectedISOHash` |
-| **"No compatible bootloader available"** (or boots via iDRAC HTML5 native Map CD/DVD but NOT via the script) | **Single-threaded `serve-iso.ps1`** could not satisfy the iDRAC boot-time streaming pattern (many concurrent HTTP Range reads) | Use the current multi-threaded, Range-aware `serve-iso.ps1`. See below. |
+|---|---|---|
+| `RAC0720` on `remoteimage -c` | ISO URL unreachable from iDRAC (server down or **inbound 8080 blocked**) | Start `serve-iso.ps1`; add inbound TCP 8080 rule; verify with a HEAD request |
+| `RAC0718` RFS service busy | Half-open RFS session from a prior blocked pull | `remoteimage -d` (both slots), then `racreset soft`, wait ~2 min |
+| Boot Failed: Virtual Optical Drive (over VPN) | iDRAC->PC **reverse boot streaming** fails on Sangfor | Serve the ISO from a **jump host on the DC LAN** (`-HttpHost 10.8.230.221`) |
+| F11 shows "Virtual Network File 2" but **not 1** | **Second RFS image blocks RFS1 boot** on this firmware | Single RFS mount only; slipstream the answer file into the golden ISO |
+| Boot Failed with Secure Boot on, old BIOS | 2021 cert store rejects 2026-signed bootloader | Update BIOS; if still failing it's the RFS2/VPN issue, not Secure Boot |
+| `0x80070001 - 0x40030` at apply, no `Panther\unattend.xml` | Answer file **rejected** (bad element order OR over-length `<Path>`) | Enforce `ImageInstall->RunSynchronous->UserData`; keep `<Path>` < 259 chars (stage scripts as files) |
+| `bootselect.ps1` never runs; no `bootdisk-select.log` | **WinPE has no powershell.exe** | Use `bootselect.cmd` (cmd/wmic/diskpart only) |
+| `'findstr' is not recognized` in WinPE | WinPE has no findstr | Parse WMIC with `for /f "skip=1 tokens=1"`, no findstr |
+| `BOSS ... disks found: 2  index:` (empty) | WMIC trailing CR counted as a 2nd line | First-valid-index-then-`goto :BossFound`; drop counting |
+| RACADM MSI: error 2711 -> 1603 | `ADDLOCAL=RACADM` feature name invalid | Install with full path + `/qn`, drop `ADDLOCAL` |
+| `Invoke-WebRequest`: "IE engine not available" (Server Core, PS 5.1) | No IE DOM engine | Add `-UseBasicParsing` |
+| IMAPI2 `REGDB_E_CLASSNOTREG` on Server Core | IMAPI COM not registered | Build ISOs with **oscdimg** (Windows ADK) |
+| `robocopy` exit 16 mirroring a mounted ISO | `/MIR` on read-only root | Use `/E`; call robocopy directly (avoid arg-quoting mangling) |
+| Node unreachable after install (APIPA 169.254.x) | Fresh install has **no IP**; network not yet applied | Network bake (SetupComplete) or iDRAC-console one-liner sets VLAN/IP |
+| WinRM `Access denied` as `LabAdmin` | Wrong account — answer file sets **Administrator** only | Use `.\Administrator`; ensure client `TrustedHosts` covers the nodes |
+| Stage 5 ARM can't find adapters | Adapter names in ARM don't match Windows | Use exact names incl. spaces: `Integrated NIC 1 Port 1-1`, `SLOT 2 Port 1/2` |
+| Az stage: `Az.Accounts not found` | Az PowerShell modules missing on the runner | `Install-Module Az.Accounts, Az.Resources -Scope CurrentUser` |
 
-### Inbound firewall for the ISO server (TCP 8080) — REQUIRED per PC
-
-The iDRAC pulls the Golden Image from this PC over **TCP 8080**. On a fresh PC the Windows Firewall blocks inbound 8080 by default, which produces confusing, cascading failures:
-
-1. First mount attempt → `ERROR: Unable to perform requested operation` (the iDRAC accepts the connect but can't reach `http://<HttpHost>:8080`, leaving a half-open Remote File Share session).
-2. Next attempt → `RAC0718: Remote File Share service is busy with the previous connection` — the wedged session blocks new connects, and `remoteimage -s` may still show *Disabled* even though the service is stuck.
-
-Fix (run once per PC, elevated):
-
+## Recovering a wedged Remote File Share (RAC0718)
 ```powershell
-New-NetFirewallRule -DisplayName 'AzureLocal ISO 8080' -Direction Inbound -Action Allow -Protocol TCP -LocalPort 8080
-```
-
-Stage 1 preflight now checks for this rule and fails fast with the exact command if it's missing (bypass with `-SkipFirewallCheck`).
-
-Recovering a wedged RFS service (RAC0718):
-
-```powershell
-racadm -r <idrac> -u root -p <pw> --nocertwarn remoteimage  -d
+racadm -r <idrac> -u root -p <pw> --nocertwarn remoteimage -d
 racadm -r <idrac> -u root -p <pw> --nocertwarn remoteimage2 -d
-racadm -r <idrac> -u root -p <pw> --nocertwarn remoteimage  -s   # confirm Disabled
-# if still busy, reset the iDRAC (does NOT reboot the host); wait ~2 min:
-racadm -r <idrac> -u root -p <pw> --nocertwarn racreset soft
+racadm -r <idrac> -u root -p <pw> --nocertwarn remoteimage -s     # confirm Disabled
+racadm -r <idrac> -u root -p <pw> --nocertwarn racreset soft      # if still busy; ~2 min to return
 ```
 
-Note: RFS1 and RFS2 share one Remote File Share service, so a wedge on either slot blocks the other; `racreset soft` clears both. This is iDRAC-side state, so switching PCs does not clear it — an old PC's orphaned session can block a new PC.
-
-### Secure Boot boot failure (known issue, confirmed on this lab)
-Symptom: the Golden Image will not boot from the Virtual Optical Drive even when selected manually via F11; the node reports `Boot Failed: Virtual Optical Drive` almost immediately.
-
-Root cause (as originally theorized): on very old BIOS, the UEFI Secure Boot certificate store predates the Golden Image bootloader signature. **Update (superseded):** on this lab, disabling Secure Boot and even updating BIOS 1.4.4 → 1.12.1 did NOT resolve the boot failure. The confirmed root cause was a second RFS image blocking golden-ISO boot (see "The real root cause" section above). Keep Secure Boot disabled only as a temporary install workaround and re-enable it before Stage 5 regardless.
-
-Confirm and fix:
+## Manual node network bring-up (iDRAC console, if the bake didn't run)
+Nodes install with APIPA only. On the node console:
 ```powershell
-racadm -r <iDRAC> -u root -p <pw> --nocertwarn get BIOS.SysSecurity.SecureBoot   # Enabled?
-racadm -r <iDRAC> -u root -p <pw> --nocertwarn get BIOS.BiosBootSettings.BootMode # keep Uefi
+$if = 'Integrated NIC 1 Port 1-1'
+Set-NetAdapterAdvancedProperty -Name $if -DisplayName 'VLAN ID' -DisplayValue 230
+New-NetIPAddress -InterfaceAlias $if -IPAddress 10.8.230.235 -PrefixLength 24 -DefaultGateway 10.8.230.1
+Set-DnsClientServerAddress -InterfaceAlias $if -ServerAddresses 10.8.230.51
+Rename-Computer -NewName azljkt01n2 -Force
+Enable-PSRemoting -Force
+Set-NetConnectionProfile -InterfaceAlias $if -NetworkCategory Private
+Restart-Computer -Force
 ```
-Automated path (per node, commits a BIOS job + reboot):
-```powershell
-.\bootstrap-cluster.ps1 -Stage 01-deploy-os -OnlyNode <iDRAC-or-name> -DisableSecureBoot -NoCertWarn
-```
-Then run the install. After the OS is on and BIOS is updated (1.4.4 → 1.21.1), re-enable Secure Boot (required for the validated cluster):
-```powershell
-.\bootstrap-cluster.ps1 -Stage 01-deploy-os -OnlyNode <iDRAC-or-name> -EnableSecureBoot -NoCertWarn
-```
-Keep `BootMode = Uefi` throughout — never switch to BIOS/Legacy. Only one bootstrap window at a time.
+(Use `.232` / `azljkt01n1` for node 1.)
 
-### "No compatible bootloader" — ISO boots via native Map but not via the script (confirmed, fixed)
-Symptom: with Secure Boot **Disabled** and the ISO **mounted** (`racadm remoteimage -s` shows Enabled), the node still fails to boot the Virtual Optical Drive — often reporting `no compatible bootloader available`. The **same ISO, same PC, same Sangfor VPN** boots fine when mapped through the iDRAC HTML5 **Virtual Console → Virtual Media → Map CD/DVD**.
+## The three forensic logs (collect these on any Stage 1 issue)
+- `X:\bootdisk-select.log` — WinPE disk selection (grab via Shift+F10 during install; gone after reboot).
+- `C:\Windows\Temp\netbootstrap.log` — post-install network bake, every step (service tag, adapter
+  match, VLAN/IP/DNS, WinRM validation, link status).
+- `C:\Bootstrap\success.txt` — proves SetupComplete finished (timestamp, hostname, tag, IP, adapter).
 
-How to tell this apart from the Secure Boot failure:
-- Secure Boot failure: `Boot Failed` **immediately**, and `get BIOS.SysSecurity.SecureBoot` returns **Enabled**.
-- This failure: Secure Boot is **Disabled**, media is **mounted**, native Map CD/DVD **boots**, but the scripted `racadm remoteimage` path does not.
-
-Root cause: mounting an ISO needs only light reads (headers/directory), so a simple server can mount it. **Booting** is different — UEFI issues sustained, concurrent HTTP **Range** requests. The original single-threaded `HttpListener` loop processed one request at a time, so boot-time range reads queued and timed out, and UEFI saw a truncated/unreadable boot image. The iDRAC HTML5 native map works because it streams over the iDRAC's own console channel, not our HTTP server.
-
-Fix: `serve-iso.ps1` is now **multi-threaded** (runspace pool, up to 24 parallel requests), with correct `206 Partial Content` / `Content-Range` handling, HTTP/1.1 keep-alive, and client-disconnect tolerance. No change to how you run Stage 1 — the orchestrator launches it the same way.
-
-Fallbacks if the scripted boot still fails on a given node:
-1. iDRAC HTML5 **Virtual Console → Virtual Media → Map CD/DVD** to the local ISO, then set next boot to Virtual CD/DVD. (Proven to work over the VPN.)
-2. Run Stage 1 from a **jump host inside `10.8.230.0/24`** (`-HttpHost 10.8.230.225`) to remove VPN latency from the boot stream entirely.
-
-### VPN throughput tuning (sequential boot + relaxed timeouts)
-When booting two nodes over a client VPN, the two iDRACs pulling the boot image **at the same time** can saturate the uplink and cause both boots to fail. Two mitigations are built in:
-
-- **Sequential boot (default for >1 node).** Stage 1 now boots one node, then paces the next so their boot-image reads do not overlap. Control it with:
-  - `-NodeBootGapSeconds 0` (default): prompt to press Enter after each node reaches Windows Setup, then boot the next.
-  - `-NodeBootGapSeconds 300`: wait a fixed 5 minutes between nodes (hands-off).
-  - `-ParallelNodes`: opt back into booting all nodes at once (old behavior).
-- **Relaxed HTTP.sys timeouts in `serve-iso.ps1`.** IdleConnection/EntityBody/DrainEntityBody are raised to 10 minutes, HeaderWait to 2 minutes, and `MinSendBytesPerSecond` lowered to 64 so a slow VPN uplink is not dropped mid-stream. The stream chunk is 256 KB (gentler on lossy links). These are best-effort and platform-dependent.
-
-If a single node still cannot boot the ISO over the VPN even sequentially, the bottleneck is the iDRAC's own reverse path to your PC over Sangfor (the native HTML5 map avoids this by streaming through the console channel). In that case the **jump host inside the DC is the durable fix** — it gives the iDRAC a LAN-speed, low-latency read.
-
-Note (superseded): the multi-threaded server and sequential/VPN tuning were real improvements, but they did NOT fix the boot failure on this lab. The confirmed root cause was a second RFS image (RFS2) blocking golden-ISO boot — see "The real root cause" section above. Use a single RFS mount with `make-golden-with-unattend.ps1`.
-
-### The real root cause: a second RFS image blocks golden-ISO boot (CONFIRMED)
-
-Symptom: the golden ISO will not boot. In the F11 → UEFI one-shot boot menu, **"Virtual Network File 2"** is listed (that is `remoteimage2` / RFS2, the small Autounattend ISO) but **"Virtual Network File 1"** (the golden ISO on RFS1) is absent — even though `racadm remoteimage -s` reports RFS1 **Enabled** with the correct ShareName. Selecting VNF2 fails to boot (correctly — it is only the answer-file image).
-
-Root cause: on R650 BIOS **1.12.1**, mounting a second RFS image prevents the large golden ISO on RFS1 from presenting as a bootable UEFI device. With RFS2 detached, RFS1 immediately becomes bootable (the boot order falls through Windows Boot Manager → PXE → **Virtual Optical Drive**, which boots).
-
-This finding supersedes the earlier theories in the two sections below. The definitive elimination sequence for this lab was:
-- Disabling Secure Boot did **not** fix it on its own.
-- Updating BIOS 1.4.4 → 1.12.1 did **not** fix it.
-- Serving from a **jump host on the DC LAN** (no VPN) did **not** fix it — so the Sangfor VPN and the HTTP server were not the cause either.
-- **Detaching RFS2 fixed it.** The golden ISO booted to Windows Setup (EMS) with a single RFS mount.
-- The iDRAC HTML5 native **Map CD/DVD** always worked because it presents as "Virtual Optical Drive" (console media), a different device that this BIOS enumerates reliably.
-
-Fix — single RFS mount with the answer file slipstreamed into the golden ISO:
-
-```powershell
-# Build the unattended golden ISO (oscdimg; UDF + BIOS/UEFI El Torito efisys_noprompt.bin)
-.\make-golden-with-unattend.ps1 `
-  -GoldenIso ..\..\isos\AzureLocal24H2.<...>_A01.en-us.iso `
-  -OutputIso ..\..\isos\AzureLocal-unattend.iso
-
-# Deploy with ONE RFS mount (no RFS2)
-.\bootstrap-cluster.ps1 -Stage 01-deploy-os -HttpHost <server-ip> `
-  -ISOFile ..\..\isos\AzureLocal-unattend.iso -StartInstallation -NoCertWarn
-```
-
-The `01-deploy-os.ps1`/`deploy-os.ps1` worker no longer mounts RFS2 at all, and actively clears any stale RFS2 before mounting RFS1. The older `make-autounattend-iso.ps1` (separate RFS2 ISO) is deprecated — use `make-golden-with-unattend.ps1`.
-
-Notes on the slipstream:
-- The rebuild uses **oscdimg** (Windows ADK "Deployment Tools"), not IMAPI2. IMAPI2 was tried first but is unreliable for large dual-boot Windows media: on Server Core the `IMAPI2FS.MsftFileSystemImage` COM class is often unregistered (`0x80040154 REGDB_E_CLASSNOTREG`), its default size cap rejects an ~8 GB payload, and `CreateResultImage` fails with `0xC0AAB132`. oscdimg avoids all three.
-- oscdimg is a single ~2 MB binary. Install the ADK "Deployment Tools" feature, or copy just `oscdimg.exe` and pass `-OscdimgPath`. The script auto-detects it on PATH and in the default ADK location.
-- UDF (`-u2 -udfver102`) is used because the Windows install image inside can exceed the 4 GB ISO9660 per-file limit.
-- The boot catalog is rebuilt with BIOS (`boot\etfsboot.com`, when present) + UEFI (`efi\microsoft\boot\efisys_noprompt.bin`) so the ISO stays bootable and skips the "Press any key to boot from CD/DVD" prompt.
-- Building needs free disk ~2x the ISO size (staging copy + output). Run on a host with space (your PC or the jump host).
-- Disk selection stays interactive (pick the BOSS RAID-1 `OS` volume) to protect the S2D data disks.
-- Validate the first rebuilt ISO by booting one node before using it on both.
-
-### Automatic BOSS boot-disk selection (default)
-
-The unattended golden ISO (built by `make-golden-with-unattend.ps1`) auto-selects and partitions the BOSS boot volume during WinPE, so the install is fully hands-off. Detection is by the **BOSS controller identity** (the RAID-1 VD enumerates with a `BOSS` friendly name), which is **model-agnostic** — it works for R650 BOSS-S2 (223 GB), R670 BOSS-N1 (960 GB), etc., so no BOSS size is hardcoded or configured.
-
-- The BOSS size is **discovered at deploy time**, not stored in `lab-config.psd1`.
-- **Safety guard:** if 0 or more than 1 disk matches, the WinPE command exits non-zero and stops before touching any disk — it will never install onto an S2D data/cache disk. You then select manually.
-- **Assumption:** on an Azure Local node only BOSS holds a Windows partition; the data/cache disks do not. Keep them clean (recreate BOSS with `-RecreateBossVd` on redeploy).
-- **Opt out:** rebuild the ISO with `-InteractiveDiskSelect` to pause at the disk screen (pick the BOSS RAID-1 `OS` volume).
-- **Logs:** the selection writes `%SystemDrive%\Windows\Temp\bootdisk-select.log` in WinPE (open a console with Shift+F10 during Setup to read it).
-- **Requires** WinPE PowerShell in the Setup boot image (the Dell Azure Local golden image includes it). If auto-select never runs, use `-InteractiveDiskSelect`.
-
-## Stage 2 — Host networking
-| Symptom | Likely cause | Fix |
-|---------|--------------|-----|
-| SMB falls back to TCP | RDMA/iWARP not enabled | Enable RDMA; set FastLinQ 41262 to iWARP; check `Get-SmbMultichannelConnection` |
-| Intents drift/asymmetry | Adapter name mismatch or manual vNICs | Use identical adapter names; let Network ATC own host networking |
-| Storage links not 25GbE | Cabling/optic mismatch | Verify Port 3↔Port 3, Port 4↔Port 4 at 25GbE |
-
-## Stage 3 — Node preparation
-| Symptom | Likely cause | Fix |
-|---------|--------------|-----|
-| Name resolution fails | Missing DNS A records | Create host/cluster A records on `10.8.230.51` |
-| Local identity errors | Built-in admin used | Create a dedicated non-built-in local admin, identical on both nodes |
-
-## Stage 4 — Azure Arc
-| Symptom | Likely cause | Fix |
-|---------|--------------|-----|
-| Providers not registered | Missing resource providers | Register required providers; recheck registrationState |
-| RBAC/registration fails | Wrong object ID, scope, or tenant | Inspect object IDs (not display names); confirm role assignments |
-| Outbound blocked | Proxy/SSL inspection or endpoint gaps | Allow required endpoints; disable SSL inspection; validate Arc Gateway coverage |
-
-## Stage 5 — Azure Local deployment
-| Symptom | Likely cause | Fix |
-|---------|--------------|-----|
-| Validation passes, deploy fails | Wrong adapter names / storage list / IP pool | Match exact OS adapter names; verify infra pool `10.8.230.132-137` |
-| Quorum unstable | Witness unreachable or shared | Use a dedicated Cloud Witness account; test outbound HTTPS from both nodes |
-| Deploy blocked by default | `-EnableDeployment` not set | Re-run with `-EnableDeployment` after `what-if` review |
-
-## Stage 6 — Cluster validation
-| Symptom | Likely cause | Fix |
-|---------|--------------|-----|
-| Cmdlets missing | Failover Clustering tools absent | Install RSAT/Failover Clustering on the management host |
-| Node mismatch / not Up | Node offline or wrong names | Verify node names and states before rechecking storage |
+## WinPE capability cheat-sheet (Azure Local 24H2 Setup media)
+- Present: `cmd`, `wmic`, `diskpart`, `cscript`.
+- **Absent: `powershell.exe`, `findstr`.** All WinPE automation must avoid both.
 
 ## General
-- Reference the Dell Support Matrix for firmware/driver/BIOS/SBE versions.
-- SBE update failing: do not force a package meant for another platform; obtain a matrix-supported bundle.
-- Collect logs from `logs/` and the ODIN config report before escalating.
-- Document lab-specific quirks and credentials in the private runbook.
+- Validate firmware/drivers/BIOS against the Dell Azure Local Support Matrix (14G-15G HCI).
+- Keep credentials and firmware versions in the private runbook.
+- Recurring "my edit didn't persist" pain came from **two clones** (`C:\zcoffee` vs `C:\LabInfra`)
+  and copy->commit->pull drift. Pick one canonical clone; verify with `Select-String` before running.

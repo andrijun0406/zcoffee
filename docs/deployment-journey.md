@@ -1,178 +1,183 @@
-# Deployment Journey — Problems, Diagnoses, and Fixes (Stage 1)
+# Deployment Journey — The Full Saga (Problems & Fixes)
 
-A chronological decision log of the Stage 1 (OS deployment) bring-up for the Jakarta 01
-lab. It records not just the fixes but the *reasoning path* — what each attempt ruled in
-or out — so a future redeploy (or a different PowerEdge model) does not have to
-rediscover any of it. Symptom-to-fix lookups live in [`troubleshooting.md`](./troubleshooting.md);
-this doc is the narrative.
+This is the chronological record of building the Stage 1 automation on the real Jakarta 01 lab
+(2 x Dell PowerEdge R650, Azure Local 24H2, switchless, over Sangfor VPN). It exists so a future
+redeploy never has to rediscover any of these. Each entry: **symptom -> root cause -> fix**, and
+what each attempt ruled in or out.
 
-## TL;DR — the one thing that actually mattered
+---
 
-The golden image would not boot for a long time. After eliminating Secure Boot, BIOS
-version, the Sangfor VPN, and the HTTP server one by one, the confirmed root cause was:
+## TL;DR — the hard-won truths
 
-> **Mounting a second iDRAC Remote File Share image (RFS2) prevents the golden ISO on
-> RFS1 from enumerating as a bootable UEFI device on R650 BIOS 1.12.1.**
+1. **Sangfor VPN is one-way for boot streaming.** Your PC reaches the iDRAC, but the iDRAC cannot
+   reliably stream the boot image back to the PC's VPN IP during UEFI boot. **Serve the ISO from a
+   jump host on the DC LAN.**
+2. **A second RFS image blocks golden-ISO boot on this firmware.** Mounting an Autounattend ISO on
+   `remoteimage2` (RFS2) makes the golden ISO on RFS1 refuse to boot (VNF2 shows, VNF1 absent).
+   **Use a single RFS mount; slipstream the answer file into the golden ISO.**
+3. **Azure Local Setup WinPE has no PowerShell and no findstr.** Any WinPE-phase automation must be
+   **cmd + wmic + diskpart** only. Post-install automation (SetupComplete) runs in the full OS where
+   PowerShell exists.
+4. **Answer-file `RunSynchronousCommand/Path` has a ~259-char schema limit.** Embedding a base64
+   `-EncodedCommand` there makes Setup reject the ENTIRE answer file (`0x80070001 - 0x40030`).
+   **Stage scripts as files; keep `<Path>` short.**
+5. **Nodes install with no network (APIPA only).** Reachable only via iDRAC console until the network
+   bake (or a manual console one-liner) sets hostname/VLAN/IP/WinRM/RDP.
+6. **The local admin is `Administrator`, not `LabAdmin`.** The answer file only sets a password; it
+   does not create a user. WinRM over IP needs the `.\Administrator` qualified form.
 
-The durable fix: **single RFS mount**, with the answer file **slipstreamed into the golden
-ISO** (`make-golden-with-unattend.ps1`, via oscdimg). Disk selection is **interactive by default**
-(pick the ~223 GB BOSS volume); automatic BOSS selection is experimental/opt-in. Everything else
-below is the path that led there.
+---
 
-## Timeline of problems and fixes
+## Timeline
 
-### 1. Serving the ISO over a client VPN
-- **Problem:** the management PC connects via Sangfor VPN and has no `10.8.230.x` address
-  (it gets a `2.2.2.x` virtual IP). The ISO server auto-detect only looks for `10.8.230.*`.
-- **Fix:** pass the Sangfor-assigned IP explicitly, e.g. `-HttpHost 2.2.2.4`. The iDRAC could
-  reach it (confirmed by the iDRAC pinging the VPN gateway), so the mount worked.
-- **Lesson:** on a client VPN, `-HttpHost` must be your current VPN-assigned IP, and it can
-  change per session — re-check `ipconfig` each time.
+### 1. ISO delivery: Python HTTP server -> native PowerShell server
+- **Problem:** original `bootstrap` used `python -m http.server` to serve the ISO; the jump host
+  (Server Core) had no Python.
+- **Fix:** replaced with `serve-iso.ps1`, a native .NET `HttpListener` server (no dependency).
 
-### 2. No Python on the management PC
-- **Problem:** the original ISO server used `python -m http.server`; the PC only had the
-  Microsoft Store alias stub, not real Python.
-- **Fix:** rewrote `serve-iso.ps1` as a native .NET `HttpListener` server — **no Python
-  dependency at all**.
+### 2. Firewall: RAC0720 / RAC0718 cascade
+- **Symptom:** `racadm remoteimage -c` failed with `RAC0720` (can't locate image), then retries hit
+  `RAC0718` (RFS service busy).
+- **Root cause:** inbound **TCP 8080 blocked** on the serving PC -> the iDRAC connected but couldn't
+  pull -> left a half-open RFS session that wedged the service.
+- **Fix:** add inbound 8080 firewall rule; added a firewall preflight to Stage 1. Recover a wedged
+  RFS with `remoteimage -d` (both slots) then `racreset soft`.
 
-### 3. Inbound firewall (the RAC0718 cascade)
-- **Problem (fresh PC):** the first `remoteimage` connect failed with
-  `ERROR: Unable to perform requested operation`, and the next attempt with
-  `RAC0718: Remote File Share service is busy`.
-- **Diagnosis:** the iDRAC accepts the connect but cannot reach `http://<PC>:8080` because
-  Windows Firewall blocks inbound 8080 by default. The half-open session then **wedges the
-  RFS service** — and `remoteimage -s` can still show *Disabled* while it is stuck.
-- **Fix:** add an inbound TCP 8080 allow rule (once per PC). Stage 1 preflight now checks for
-  it and fails fast. Recover a wedged service with `remoteimage -d` on both slots, then
-  `racreset soft` if needed (iDRAC-side state — switching PCs does not clear it).
+### 3. Boot failures round 1: Secure Boot on old BIOS
+- **Symptom:** golden ISO mounted fine but node showed **Boot Failed: Virtual Optical Drive**, even
+  from a manual F11 selection.
+- **Root cause:** Secure Boot enabled on **BIOS 1.4.4** (2021-era) with an outdated certificate store
+  rejecting the 2026-signed Azure Local bootloader.
+- **Finding:** disabling Secure Boot let it boot to Windows Setup/EMS. So Secure Boot was *a* cause.
 
-### 4. Boot failure, round 1 — Secure Boot theory
-- **Problem:** the golden ISO mounted but would not boot; `Boot Failed: Virtual Optical Drive`.
-- **Attempt:** Secure Boot was Enabled on old BIOS (1.4.4). Disabled it via a BIOS config job.
-- **Result:** one node booted **once** to Windows Setup (EMS) — which made Secure Boot look
-  like the cause. It was not the whole story.
+### 4. Boot failures round 2: BIOS update didn't fix it
+- Updated BIOS 1.4.4 -> 1.12.1. **Still failed to boot** with Secure Boot re-enabled.
+- **Ruled out:** old-BIOS cert store was not the whole story.
 
-### 5. Boot failure, round 2 — BIOS update
-- **Attempt:** updated BIOS 1.4.4 → 1.12.1 to refresh the Secure Boot certificate store and
-  fix the flaky one-time-boot override.
-- **Result:** **still failed to boot.** This ruled out both Secure Boot and BIOS age as the
-  root cause.
+### 5. Boot failures round 3: HTTP server concurrency
+- Rewrote `serve-iso.ps1` multi-threaded (runspace pool) with HTTP Range/206 support and VPN-tolerant
+  timeouts, because UEFI boot issues many concurrent range reads.
+- Added **sequential node boot** pacing so two iDRACs don't stream over the VPN simultaneously.
+- Helped, but boot was still unreliable over the VPN.
 
-### 6. Boot failure, round 3 — HTTP server concurrency
-- **Observation:** the iDRAC HTML5 **native Map CD/DVD** always booted the same ISO, but the
-  scripted `racadm remoteimage` path did not (`no compatible bootloader available`).
-- **Diagnosis:** mounting needs only light reads; **booting** needs sustained, concurrent
-  HTTP Range reads. The original single-threaded `HttpListener` queued them and timed out.
-- **Fix:** rewrote `serve-iso.ps1` as **multi-threaded** (runspace pool, `206 Partial Content`
-  / `Content-Range`, keep-alive, disconnect-tolerant) and relaxed HTTP.sys timeouts for the
-  VPN. Also added **sequential boot** (default for >1 node) so two iDRACs don't saturate the
-  uplink at once. Real improvements — but the boot **still failed**.
+### 6. Boot failures round 4: the VPN reverse path
+- **Decisive test:** the iDRAC **HTML5 native "Map CD/DVD"** (which rides the PC's own VPN tunnel)
+  booted the same ISO every time; `racadm remoteimage` (iDRAC dials back to the PC) did not.
+- **Root cause:** the iDRAC->PC reverse connection over Sangfor can't sustain boot-time streaming.
+- **Fix:** run Stage 1 from a **jump host inside 10.8.230.0/24** (`-HttpHost 10.8.230.221`).
 
-### 7. Boot failure, round 4 — jump host (removing the VPN)
-- **Attempt:** copied the repo + ISO to a jump host inside `10.8.230.0/24` and served the ISO
-  on the DC LAN (`-HttpHost 10.8.230.221`), removing Sangfor from the boot path entirely.
-- **Result:** **still failed** — which finally ruled out the VPN *and* the HTTP server as the
-  cause. (The jump host is Windows Server Core; see the operational notes below for the
-  RACADM-on-Core and `-UseBasicParsing` issues encountered here.)
+### 7. Server Core gotchas on the jump host
+- **RACADM install:** `msiexec /i iDRACTools_x64.msi ADDLOCAL=RACADM` failed with **error 2711 ->
+  1603** ("feature RACADM not found"). Fix: drop `ADDLOCAL`, use full absolute path + `/qn`.
+- **`Invoke-WebRequest` failed** with "IE engine not available" under Windows PowerShell 5.1 on
+  Core. Fix: `-UseBasicParsing`.
+- **IMAPI2 COM not registered** on Core (`REGDB_E_CLASSNOTREG`) -> can't build ISOs with IMAPI.
+  Fix: use **oscdimg** (Windows ADK) instead.
 
-### 8. Root cause found — the second RFS image
-- **Observation:** in the F11 → UEFI boot menu, **"Virtual Network File 2"** (RFS2 = the small
-  Autounattend ISO) was listed, but **"Virtual Network File 1"** (the golden ISO) was **absent**
-  — even though `remoteimage -s` reported RFS1 Enabled.
-- **Test:** detached RFS2 and mounted only the golden ISO. The node immediately booted (boot
-  order fell through Windows Boot Manager → PXE → **Virtual Optical Drive**, which booted) and
-  reached Windows Setup.
-- **Confirmed root cause:** on R650 BIOS 1.12.1, a second mounted RFS image blocks the large
-  golden ISO on RFS1 from presenting as a bootable device. The native HTML5 map always worked
-  because it presents as console "Virtual Optical Drive", a different device this BIOS
-  enumerates reliably.
+### 8. THE root cause of boot failure: a second RFS image
+- **Symptom:** with both the golden ISO (RFS1) and a tiny Autounattend ISO (RFS2) mounted, the F11
+  UEFI menu showed **"Virtual Network File 2"** but **no "Virtual Network File 1"** — the golden ISO
+  wasn't bootable. Detaching RFS2 -> golden ISO booted immediately.
+- **Root cause:** on this iDRAC/BIOS, mounting RFS2 suppresses RFS1's boot enumeration.
+- **Fix:** **single RFS mount only.** Deliver the answer file by **slipstreaming it into the golden
+  ISO** (`make-golden-with-unattend.ps1`), not via a second mount. This retired the whole RFS2 path.
 
-### 9. Fix — single RFS + slipstreamed answer file
-- **Change:** removed the RFS2 path from `deploy-os.ps1` / `01-deploy-os.ps1` entirely (it still
-  *detaches* any stale RFS2 before mounting RFS1). Built `make-golden-with-unattend.ps1` to bake
-  `Autounattend.xml` into the golden ISO so the install stays unattended over a single mount.
-- **Result:** node .84 installed fully hands-off (locale, timezone, admin password auto-applied),
-  pausing only at the disk screen.
+### 9. Slipstream ISO build problems (oscdimg)
+- `robocopy /MIR` on a read-only mounted ISO root -> **exit 16**; switched to `/E` (and later a
+  direct call to avoid an argument-quoting bug that mangled the source path).
+- IMAPI attempts hit `FreeMediaBlocks` size cap and `0xC0AAB132` on the large dual-boot Windows ISO.
+- **Fix:** extract golden ISO -> stage tree -> inject `Autounattend.xml` -> repack with
+  **oscdimg** (`-u2 -udfver102`, BIOS+UEFI boot with `efisys_noprompt.bin`).
 
-### 10. Building the unattended ISO — IMAPI2 vs oscdimg
-- **Attempt:** IMAPI2 COM to repack the ISO. Hit three separate failures:
-  - `0x80040154 REGDB_E_CLASSNOTREG` — `IMAPI2FS.MsftFileSystemImage` unregistered on Server Core.
-  - Size-cap error — default optical media cap rejected the ~8 GB payload.
-  - `0xC0AAB132` — `CreateResultImage`/boot-image finalization failed on large dual-boot media.
-- **Fix:** rewrote the build to use **oscdimg** (Windows ADK Deployment Tools): mount → robocopy
-  to staging → drop `Autounattend.xml` → repack with UDF (`-u2 -udfver102`) + BIOS/UEFI El Torito
-  (`efisys_noprompt.bin`). Also fixed a robocopy argument-quoting bug (`I:\"` → exit 16) and
-  switched `/MIR` → `/E` for read-only source media.
+### 10. Answer file rejected: element order (0x80070001 - 0x40030)
+- **Symptom:** apply-phase failure; no `C:\Windows\Panther\unattend.xml`.
+- **Root cause:** `Microsoft-Windows-Setup` component elements were out of schema order.
+- **Fix:** enforce `ImageInstall -> RunSynchronous -> UserData` sequence.
 
-### 11. Automatic disk selection — attempted, then reverted to opt-in
-- **Goal:** remove the last manual step (picking the BOSS volume), portably across PowerEdge
-  models where BOSS capacity differs (R650 BOSS-S2 223 GB vs R670 BOSS-N1 960 GB).
-- **Approach:** a WinPE `RunSynchronous` step detects the BOSS RAID-1 VD by **controller identity**
-  (a `BOSS` friendly name — model-agnostic, no size configured), `diskpart`-cleans it, creates the
-  UEFI/GPT layout, and installs via `InstallToAvailablePartition`. A safety guard halts before
-  touching any disk if detection is ambiguous (0 or >1 match), so it can never wipe an S2D disk.
-- **Made it the default at first — that was wrong (see step 12).** It is now EXPERIMENTAL and
-  **opt-in via `-AutoSelectBootDisk`; INTERACTIVE is the default** (the proven .84 path).
+### 11. Auto disk-select rejected: over-length `<Path>`
+- **Symptom:** same `0x40030`; answer file rejected outright again.
+- **Root cause:** the auto-select `RunSynchronousCommand/Path` contained a multi-KB base64
+  `-EncodedCommand`, exceeding the unattend schema's **~259-char Path limit**, so Setup discarded the
+  whole answer file.
+- **Fix:** stage the selection script as a **file** and keep `<Path>` short.
 
-### 12. Answer file rejected on .86 — XML element order (CONFIRMED)
-- **Symptom:** node .86 booted the golden ISO fine, Azure Stack HCI Setup started, then failed
-  **`0x80070001 - 0x4003x`**. From Shift+F10: **no `C:\Windows\Panther\unattend.xml`** and
-  **no `bootdisk-select.log`**.
-- **Cause:** the auto-select rebuild emitted an `Autounattend.xml` with the `windowsPE`
-  `Microsoft-Windows-Setup` child elements **out of schema order**. The sequence must be
-  `ImageInstall -> RunSynchronous -> UserData`; it was assembled as `RunSynchronous -> ImageInstall
-  -> UserData`. An out-of-order element makes Setup **reject the entire answer file** — so nothing
-  applied (no Panther copy) and the `RunSynchronous` disk step never ran (no log), producing the
-  apply-phase error. Node .84 was unaffected because its earlier ISO had only `<UserData>` (a valid
-  single-element sequence).
-- **Fix:** corrected the element order in `make-golden-with-unattend.ps1`, reverted the default to
-  interactive, and added `make-unattend-xml-only.ps1` so the answer file can be validated LIVE via
-  `setup.exe /unattend:<path>` (fast) before committing to an ~8 GB ISO rebuild.
-- **Lesson:** validate answer-file XML with the `/unattend:` loop, not by rebuilding the ISO each time.
+### 12. Auto-select still didn't run: no PowerShell in WinPE
+- **Symptom:** `bootselect.ps1` present on media, but the disk screen still appeared and
+  `bootdisk-select.log` was never created.
+- **Root cause verified:** `dir X:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe` ->
+  **File Not Found**. Azure Local Setup WinPE ships **without PowerShell**. A `.ps1` can never run in
+  windowsPE.
+- **Fix:** rewrite as **`bootselect.cmd`** using **cmd + wmic + diskpart** only. Confirmed present:
+  cmd, wmic, diskpart, cscript. Confirmed **absent**: powershell, findstr.
 
-### Aside: stale "Virtual Network File 2" boot entry
-- After the earlier RFS2 experiments, an orphaned **Virtual Network File 2** boot variable can
-  persist in UEFI NVRAM and take boot priority even after the device is detached. Remove it via
-  Boot Manager → **Delete Boot Option**, or set a persistent VCD boot with `-UseUefiBootOrder`.
+### 13. bootselect.cmd parsing: WMIC trailing carriage return
+- **Symptom (from `bootdisk-select.log`):** `BOSS 'DELLBOSS VD' disks found: 2  index:` — count 2,
+  empty index, even though there is exactly one BOSS.
+- **Root cause:** WMIC output has a trailing CR/blank line; `for /f ... if not "%%i"==""` counted the
+  CR-only line and mis-parsed the index.
+- **Fix:** take the **first valid index and stop** (`goto :BossFound`), removing the counting logic:
+  ```bat
+  for /f "skip=1 tokens=1" %%i in ('wmic diskdrive where "model='DELLBOSS VD'" get index') do (
+      echo [%DATE% %TIME%] RAW_WMIC_VALUE=[%%i]>> "%LOG%"
+      if not "%%i"=="" ( set "BOSS_INDEX=%%i" & goto :BossFound )
+  )
+  :BossFound
+  ```
+- **Safety:** exact model match `DELLBOSS VD` + never guess; if no index, log and `exit /b 0` so
+  Setup falls through to manual disk selection (never aborts Setup with a non-zero code).
 
-## What was ruled out (so we don't retry it)
+### 14. Networking moved out of the answer file
+- Because WinPE has no PowerShell and `<Path>` is length-limited, all network config is done
+  **post-install** via `$OEM$\$$\Setup\Scripts\SetupComplete.cmd -> netbootstrap.ps1`, which runs in
+  the full OS (PowerShell available), keyed by Dell service tag.
 
-| Theory | Verdict |
-|--------|---------|
-| Sangfor VPN was breaking the boot stream | **Ruled out** — jump host on the DC LAN failed the same way until RFS2 was removed |
-| Secure Boot on old BIOS | **Ruled out as root cause** — disabling it did not fix boot (kept off only as a workaround; re-enable before Stage 5) |
-| BIOS version too old | **Ruled out** — 1.4.4 → 1.12.1 did not fix boot |
-| Single-threaded HTTP server | **Real improvement, not the root cause** — multi-threaded server still failed with RFS2 mounted |
-| Firmware/driver mismatch | Not the boot cause; the SBE handles the validated baseline during Stage 5 |
-| **Second RFS image (RFS2) mounted** | **CONFIRMED root cause** — detaching it fixed the boot |
-| **Auto disk-select answer file (`0x4003x`)** | **CONFIRMED** — XML element order (`ImageInstall`→`RunSynchronous`→`UserData`) was wrong; Setup rejected the whole file. Fixed; auto-select is now opt-in |
+### 15. IP / VLAN / identity realities (discovered live)
+- Fresh installs come up with **APIPA only** — reachable solely via iDRAC console until configured.
+- **VLAN 230 must be tagged host-side** (ToR port is a trunk, 230 not native). The QLogic driver
+  exposes a `VLAN ID` advanced property (`VlanID`), set to `230`.
+- DC admin reassigned node IPs: **`.71/.72` were taken -> use `.232` (n1) and `.235` (n2)**.
+- Local admin account is **`Administrator`** (answer file sets only the password). WinRM over IP
+  needs **`.\Administrator`** and the client `TrustedHosts` to include the nodes (ours was already `*`).
 
-## The proven, repeatable Stage 1 path
+### 16. Final hardening of netbootstrap.ps1 (post-install)
+- **NIC driver retry:** 5-minute loop (30 x 10s) — SetupComplete can run before NIC drivers finish.
+- **Deterministic adapter selection:** match by **MAC** first (from `lab-config.psd1`), then
+  configured name, then `QL41232`-not-`SLOT 2`; **never** "first Up adapter" — `exit 5` if ambiguous.
+- **VLAN property detection:** log all advanced properties, try `VLAN ID / VLAN / Port VLAN ID /
+  802.1Q VLAN ID` + registry keyword fallback (QLogic naming varies by driver).
+- **WinRM validation:** `Test-WSMan` after `Enable-PSRemoting` to prove the listener is actually up.
+- **Logging + markers:** `C:\Windows\Temp\netbootstrap.log` (every step) and
+  `C:\Bootstrap\success.txt` (timestamp, hostname, service tag, IP, adapter).
+- **Final reboot:** `shutdown /r /t 15` to settle rename + VLAN + profile.
 
-```powershell
-# 1. Build the unattended golden ISO once (oscdimg; single bootable image).
-#    Disk selection is INTERACTIVE by default (pick ~223 GB BOSS). Add -AutoSelectBootDisk only
-#    after validating the answer file live with make-unattend-xml-only.ps1 + setup.exe /unattend:.
-.\make-golden-with-unattend.ps1 -OscdimgPath C:\Tools\oscdimg\oscdimg.exe `
-  -GoldenIso ..\..\isos\AzureLocal24H2.<...>_A01.en-us.iso `
-  -OutputIso ..\..\isos\AzureLocal-unattend.iso
+### 17. BOSS disk-select safety design
+- **Identity-first** match on `DELLBOSS VD` (model). Identity match is trusted at **any size** (so a
+  future R670 BOSS-N1 960 GB or 1.92 TB isn't wrongly excluded).
+- Size ceiling (`BootDiskMaxSizeGB`, default **0 = unlimited**) only ever bounds the **fallback
+  guess**, never a positive identity match.
+- Never touches disks in an existing S2D pool; requires exactly one candidate.
 
-# 2. (If Secure Boot is on and blocking) disable it temporarily, per node
-.\bootstrap-cluster.ps1 -Stage 01-deploy-os -OnlyNode <iDRAC> -DisableSecureBoot -NoCertWarn
+---
 
-# 3. Recreate BOSS + install, single RFS mount, one node first to validate
-.\bootstrap-cluster.ps1 -Stage 01-deploy-os -OnlyNode <iDRAC> -HttpHost <server-ip> `
-  -RACADMPath 'C:\Program Files\Dell\SysMgt\iDRACTools\racadm\racadm.exe' `
-  -ISOFile ..\..\isos\AzureLocal-unattend.iso -RecreateBossVd -StartInstallation -NoCertWarn
+## What was ruled OUT (so we don't chase it again)
 
-# 4. Then both nodes (sequential boot by default)
-.\bootstrap-cluster.ps1 -Stage 01-deploy-os -HttpHost <server-ip> `
-  -RACADMPath 'C:\Program Files\Dell\SysMgt\iDRACTools\racadm\racadm.exe' `
-  -ISOFile ..\..\isos\AzureLocal-unattend.iso -StartInstallation -NoCertWarn
-```
+| Hypothesis | Verdict |
+|---|---|
+| VPN can't carry the ISO at all | FALSE — mount works; only iDRAC->PC **boot streaming** is unreliable |
+| Old BIOS / Secure Boot cert store | Contributing, but **not** the root cause (update didn't fix boot) |
+| Single-threaded HTTP server | Improved, but not the root cause |
+| Corrupt ISO | FALSE — same ISO boots via native HTML5 map |
+| **Second RFS image (RFS2) blocks RFS1 boot** | **CONFIRMED root cause of boot failure** |
+| Auto-select logic bug | FALSE at first — WinPE simply has **no PowerShell**; later a real WMIC CR parse bug |
+| Empty `<Path>` | FALSE — `<Path>` was **too long** (>259 chars), not empty |
 
-## Post-install follow-ups
-- Re-enable Secure Boot on both nodes before Stage 5 (Azure Local requires it).
-- Rotate the iDRAC and local admin passwords (defaults were used during bring-up).
-- Update BIOS/firmware to the support-matrix baseline (or let the SBE handle it at Stage 5).
-- Keep `config/lab-config.psd1` aligned with the ODIN config report.
+---
+
+## Confirmed-working end state (Stage 1)
+Node `.235` (azljkt01n2), fully hands-off from a single `bootstrap-cluster.ps1 -Stage 01-deploy-os`
+run against the jump host:
+- WinPE `bootselect.cmd` -> `DELLBOSS VD` index 8 -> DiskPart partitions -> Setup skips disk screen.
+- Post-install `netbootstrap.ps1` -> service tag `1G7C7J3` -> `azljkt01n2` / `10.8.230.235`, adapter
+  matched by MAC `34:80:0D:2E:8B:88`, VLAN 230, DNS `.51`, WinRM validated, RDP enabled, success
+  marker written, reboot.
+- Verified from jump host: `Test-NetConnection .235 -Port 5985` and `-Port 3389` both True.
