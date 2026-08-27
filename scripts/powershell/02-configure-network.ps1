@@ -53,7 +53,7 @@ $b   = $PSBoundParameters
 
 # --- Resolve settings from config (parameters override) ---
 $LocalAdminUser = Resolve-Setting -Name 'LocalAdminUser' -Bound $b -Current $LocalAdminUser -ConfigKey 'LocalAdminUser' -Config $cfg
-if (-not $LocalAdminUser) { $LocalAdminUser = 'Administrator' }
+if (-not $LocalAdminUser) { $LocalAdminUser = 'LabAdmin' }
 
 if (-not $b.ContainsKey('NodeIPs')) {
     if ($cfg.ContainsKey('Nodes')) { $NodeIPs = @($cfg.Nodes | ForEach-Object { $_.HostIP }) }
@@ -166,7 +166,7 @@ $remoteCheck = {
             Desc      = $a.InterfaceDescription
             Status    = $a.Status
             LinkSpeed = $a.LinkSpeed
-            MediaState= $a.MediaConnectionState
+            MediaState= $(switch ("$($a.MediaConnectionState)") { '1' {'Connected'} '2' {'Disconnected'} '0' {'Unknown'} 'Connected' {'Connected'} 'Disconnected' {'Disconnected'} default {"$($a.MediaConnectionState)"} })
             MacAddress= $a.MacAddress
         }
     }
