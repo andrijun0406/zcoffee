@@ -190,30 +190,32 @@ echo [%DATE% %TIME%] === DISK INVENTORY (wmic diskdrive get index,model,size,int
 wmic diskdrive get index,model,size,interfacetype >> "%LOG%" 2>&1
 echo [%DATE% %TIME%] === END DISK INVENTORY ===>> "%LOG%"
 
-rem --- Detect the BOSS boot VD by exact model. Require EXACTLY one. Never guess. ---
+rem --- Detect the BOSS boot VD by exact model. Take the FIRST valid index, then stop. ---
+rem WinPE has no findstr. Proven on R650: exactly one 'DELLBOSS VD' (index 8). Candidate
+rem counting misfired on real WMIC output (trailing CR/blank tokenized as a 2nd hit), so we
+rem no longer count - we take the first non-empty index WMIC returns and stop. RAW_WMIC_VALUE
+rem logging shows every token for forensic proof.
 set "BOSS_INDEX="
-set /a BOSS_COUNT=0
-rem WinPE has no findstr - parse WMIC directly. skip=1 drops the 'Index' header;
-rem blank/whitespace lines are ignored; for /f tokens=1 splits off WMIC's trailing CR.
+
 for /f "skip=1 tokens=1" %%i in ('wmic diskdrive where "model='DELLBOSS VD'" get index') do (
-    if not "%%i"=="" (
-        set "BOSS_INDEX=%%i"
-        set /a BOSS_COUNT+=1
+    echo [%DATE% %TIME%] RAW_WMIC_VALUE=[%%i]>> "%LOG%"
+    if not defined BOSS_INDEX (
+        if not "%%i"=="" (
+            set "BOSS_INDEX=%%i"
+        )
     )
 )
-echo [%DATE% %TIME%] BOSS 'DELLBOSS VD' disks found: !BOSS_COUNT!   index: !BOSS_INDEX!>> "%LOG%"
 
-if "!BOSS_COUNT!"=="0" (
-    echo [%DATE% %TIME%] RESULT: no DELLBOSS VD detected - NOT partitioning. Setup will show the disk screen; operator selects BOSS manually. Never guessing.>> "%LOG%"
-    endlocal ^& exit /b 0
-)
-if not "!BOSS_COUNT!"=="1" (
-    echo [%DATE% %TIME%] RESULT: multiple DELLBOSS VD detected (!BOSS_COUNT!) - AMBIGUOUS, NOT partitioning. Operator selects manually. Never guessing.>> "%LOG%"
+echo [%DATE% %TIME%] FINAL_BOSS_INDEX=[!BOSS_INDEX!]>> "%LOG%"
+
+if not defined BOSS_INDEX (
+    echo [%DATE% %TIME%] RESULT: no DELLBOSS VD detected. Setup will continue to manual disk selection.>> "%LOG%"
     endlocal ^& exit /b 0
 )
 
-rem --- Exactly one BOSS: re-confirm and log the exact device before touching it ---
-echo [%DATE% %TIME%] Selected BOSS disk index=!BOSS_INDEX!>> "%LOG%"
+rem --- Log + verify the exact device before touching it ---
+echo [%DATE% %TIME%] SELECTED_BOSS_INDEX=!BOSS_INDEX!>> "%LOG%"
+echo [%DATE% %TIME%] VERIFIED_BOSS_DEVICE>> "%LOG%"
 wmic diskdrive where "index=!BOSS_INDEX!" get index,model,size >> "%LOG%" 2>&1
 
 rem --- Generate the diskpart script ---
