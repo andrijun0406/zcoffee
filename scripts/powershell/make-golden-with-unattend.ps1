@@ -199,12 +199,12 @@ set "BOSS_INDEX="
 
 for /f "skip=1 tokens=1" %%i in ('wmic diskdrive where "model='DELLBOSS VD'" get index') do (
     echo [%DATE% %TIME%] RAW_WMIC_VALUE=[%%i]>> "%LOG%"
-    if not defined BOSS_INDEX (
-        if not "%%i"=="" (
-            set "BOSS_INDEX=%%i"
-        )
+    if not "%%i"=="" (
+        set "BOSS_INDEX=%%i"
+        goto :BossFound
     )
 )
+:BossFound
 
 echo [%DATE% %TIME%] FINAL_BOSS_INDEX=[!BOSS_INDEX!]>> "%LOG%"
 
