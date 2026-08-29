@@ -88,7 +88,7 @@ $roles = @(
     'User Access Administrator'
 )
 
-Initialize-Ui -StageName '00-create-service-principal' -TotalSteps 5 -UseGui:$UseGui
+Initialize-Ui -StageName '00-create-service-principal' -TotalSteps 6 -UseGui:$UseGui
 
 try {
     Invoke-Step 'Ensure Az modules present' {
@@ -233,6 +233,15 @@ try {
             Write-Host "   (Azure shows the secret ONCE - it cannot be retrieved later.)" -ForegroundColor Yellow
         }
         Write-Host '  -------------------------------------------------------------------------' -ForegroundColor Cyan
+    }
+
+    Invoke-Step 'Capture node local-admin credential (DPAPI, one-time)' {
+        if (Get-Command Set-LabNodeCredential -ErrorAction SilentlyContinue) {
+            [void](Set-LabNodeCredential -User 'Administrator')
+            Write-Info 'Stages 2/3/4 and the orchestrator will reuse this - no more WinRM password prompts.'
+        } else {
+            Write-Warn 'Set-LabNodeCredential not found (append ui-credstore block to ui-common.ps1). Skipping node-credential capture.'
+        }
     }
 
     Complete-Ui -FinalMessage 'Service principal ready. Use it for Stage 4/5 unattended runs.'

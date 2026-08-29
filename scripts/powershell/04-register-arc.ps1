@@ -19,14 +19,9 @@
     SP object id from inside an SP context may require directory-read the SP lacks, pass -AccountId
     explicitly (Stage 0 prints it) to make this deterministic.
 
-    Stale-state note: a node whose prior onboarding succeeded locally but whose Azure resource was
-    later deleted will still report Connected via azcmagent. -ForceReregister clears that local
-    state (azcmagent disconnect --force-local-only) before re-onboarding.
-
 .NOTES
     Arc-init failure is FATAL (throws), not a swallowed warning. Args are built from the cmdlet's
-    ACTUAL parameters on the node so this survives installer version changes. Status detection uses
-    azcmagent JSON output (deterministic) rather than text/regex parsing.
+    ACTUAL parameters on the node so this survives installer version changes.
 #>
 [CmdletBinding(SupportsShouldProcess = $true)]
 param(
@@ -39,6 +34,7 @@ param(
     [string]$Region,
     [string]$Cloud = 'AzureCloud',
 
+    # Node access (WinRM), same as Stages 2/3.
     [string[]]$NodeIPs,
     [string]$LocalAdminUser,
     [SecureString]$LocalAdminPassword,
@@ -48,8 +44,11 @@ param(
     [switch]$ConfigureTrustedHosts,
     [switch]$SkipCertCheck,
 
+    # Perform the actual registration (Register mode requires this).
     [switch]$Apply,
+    # Use an existing Az context on the jump host instead of interactive device sign-in.
     [switch]$UseExistingAzLogin,
+    # Unattended service-principal / managed-identity auth (zero-touch).
     [string]$ServicePrincipalId,
     [SecureString]$ServicePrincipalSecret,
     [string]$CertificateThumbprint,
@@ -57,9 +56,6 @@ param(
     # Explicit AccountID (object id of the signed-in identity). Recommended for CERT service
     # principals where directory-read to resolve the SP object id may be unavailable.
     [string]$AccountId,
-    # Force re-onboarding even if the local agent reports Connected (clears stale local state from
-    # a prior onboard whose Azure resource was later deleted).
-    [switch]$ForceReregister,
     [switch]$UseGui
 )
 
@@ -110,25 +106,17 @@ if ($registerMode -and -not $Apply) { throw 'Register mode requires -Apply (safe
 $totalSteps = 5 + ($NodeIPs.Count)
 Initialize-Ui -StageName '04-register-arc' -TotalSteps $totalSteps -UseGui:$UseGui
 
+# Node-side Arc initialization (runs ON each node via WinRM).
 $remoteArc = {
-    param($subId, $rg, $tenant, $region, $cloud, $armToken, $accountId, $doRegister, $spAppId, $spSecret, $forceReregister)
+    param($subId, $rg, $tenant, $region, $cloud, $armToken, $accountId, $doRegister, $spAppId, $spSecret)
 
     $o = [ordered]@{ Actions=@(); Warnings=@(); Errors=@(); AlreadyConnected=$false; ModulesOk=$false; Registered=$false }
     $agentExe = "$env:ProgramFiles\AzureConnectedMachineAgent\azcmagent.exe"
 
-    # Deterministic status via JSON (avoids fragile text/regex parsing of 'Disconnected').
-    $localStatus = 'Unknown'
     try {
         if (Test-Path $agentExe) {
-            $j = & $agentExe show -j 2>$null | Out-String
-            if ($j) { try { $localStatus = [string](ConvertFrom-Json $j).status } catch { $localStatus = 'Unknown' } }
-            if ($forceReregister -and $localStatus -ne 'Unknown') {
-                & $agentExe disconnect --force-local-only 2>$null | Out-Null
-                $o.Actions += "Force re-register: cleared local agent state (was $localStatus)"
-                $localStatus = 'Disconnected'
-            }
-            if ($localStatus -eq 'Connected') { $o.AlreadyConnected = $true; $o.Actions += 'azcmagent status: Connected' }
-            else { $o.Actions += "azcmagent status: $localStatus" }
+            $agent = & $agentExe show 2>$null
+            if ($agent -match 'Connected') { $o.AlreadyConnected = $true; $o.Actions += 'azcmagent already Connected' }
         }
     } catch { }
 
@@ -249,6 +237,7 @@ try {
         }
         $script:armToken = $tok
 
+        # AccountID resolution: explicit param > SP object-id lookup > signed-in user > context.
         $acctId = $null
         if ($script:AccountId) {
             $acctId = $script:AccountId
@@ -264,6 +253,7 @@ try {
         $script:accountId = $acctId
         Write-Info "AccountID resolved to: $acctId"
 
+        # SpnCredential path only when an SP SECRET is available (not for cert SPs).
         $script:spAppIdForNode = $null
         $script:spSecretForNode = $null
         if ($script:ServicePrincipalId -and $script:ServicePrincipalSecret) {
@@ -279,10 +269,12 @@ try {
     }
 
     Invoke-Step 'Resolve node credentials and WinRM connectivity' {
-        if (-not $b.ContainsKey('LocalAdminPassword') -or $null -eq $script:LocalAdminPassword) {
-            $script:LocalAdminPassword = Read-Host -Prompt "Enter the local admin password for '$script:authUser' on the nodes" -AsSecureString
+        if ($b.ContainsKey('LocalAdminPassword') -and $null -ne $script:LocalAdminPassword) {
+            $script:cred = [System.Management.Automation.PSCredential]::new($script:authUser, $script:LocalAdminPassword)
+        } else {
+            # No password passed: use the DPAPI node-credential store (Stage 0 captured it once).
+            $script:cred = Get-LabNodeCredential -User $script:authUser
         }
-        $script:cred = [System.Management.Automation.PSCredential]::new($script:authUser, $script:LocalAdminPassword)
 
         if ($script:ConfigureTrustedHosts) {
             $current = (Get-Item WSMan:\localhost\Client\TrustedHosts -ErrorAction SilentlyContinue).Value
@@ -325,7 +317,7 @@ try {
             $r = Invoke-Command @connArgs -ScriptBlock $remoteArc -ArgumentList @(
                 $script:SubscriptionId, $script:ResourceGroupName, $script:TenantId, $script:Region, $script:Cloud,
                 $script:armToken, $script:accountId, [bool]$script:registerMode,
-                $script:spAppIdForNode, $script:spSecretForNode, [bool]$script:ForceReregister)
+                $script:spAppIdForNode, $script:spSecretForNode)
 
             $r = @($r) | Where-Object { $_ -is [pscustomobject] -and $_.PSObject.Properties.Name -contains 'Actions' } | Select-Object -Last 1
             if (-not $r) { throw "No Arc result object returned from $ip (scriptblock output was unexpected)." }
@@ -338,7 +330,7 @@ try {
                 if ($r.ModulesOk) { Write-Ok "$ip prerequisites OK (modules present)" }
                 else { Write-Warn "$ip missing Arc modules (Register mode installs them)" }
             } else {
-                if ($r.AlreadyConnected) { Write-Ok "$ip already Arc-connected (skipped; use -ForceReregister to re-onboard)" }
+                if ($r.AlreadyConnected) { Write-Ok "$ip already Arc-connected (skipped)" }
                 elseif ($r.Registered)   { Write-Ok "$ip Arc initialization succeeded" }
                 elseif ($r.Errors.Count -eq 0) { Write-Warn "$ip did not register and reported no error (investigate)" }
             }

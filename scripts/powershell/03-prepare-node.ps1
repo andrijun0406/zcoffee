@@ -230,10 +230,12 @@ $remoteCheck = {
 
 try {
     Invoke-Step 'Resolve credentials and (optionally) set WinRM TrustedHosts' {
-        if (-not $b.ContainsKey('LocalAdminPassword') -or $null -eq $script:LocalAdminPassword) {
-            $script:LocalAdminPassword = Read-Host -Prompt "Enter the local admin password for '$script:authUser' on the nodes" -AsSecureString
+        if ($b.ContainsKey('LocalAdminPassword') -and $null -ne $script:LocalAdminPassword) {
+            $script:cred = [System.Management.Automation.PSCredential]::new($script:authUser, $script:LocalAdminPassword)
+        } else {
+            # No password passed: use the DPAPI node-credential store (Stage 0 captured it once).
+            $script:cred = Get-LabNodeCredential -User $script:authUser
         }
-        $script:cred = [System.Management.Automation.PSCredential]::new($script:authUser, $script:LocalAdminPassword)
         Write-Info "Credential built for '$script:authUser' (value never logged)."
         Write-Info "Transport: $script:Transport on port $script:Port."
 

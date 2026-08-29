@@ -407,3 +407,85 @@ function Connect-AzForStage {
     Set-AzContext -Subscription $SubscriptionId -Tenant $TenantId -ErrorAction Stop | Out-Null
     return Get-AzContext
 }
+
+# ---------------- Node credential store (DPAPI, per user + per machine) ----------------
+# Capture the node local-admin password ONCE (Stage 0), reuse everywhere with no prompts.
+# Storage: ConvertFrom-SecureString => DPAPI blob, decryptable ONLY by the same Windows
+# user on the same machine. Never plaintext, never committed. gitignore *.secret.local.
+
+function Get-LabSecretPath {
+    param([Parameter(Mandatory)][string]$Name)
+    $dir = Join-Path $PSScriptRoot 'config'
+    if (-not (Test-Path $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
+    Join-Path $dir "$Name.secret.local"
+}
+
+function Set-LabNodeCredential {
+    <#
+      Stage 0 calls this to persist the node local-admin password (DPAPI-encrypted).
+      -User defaults to Administrator (the account the golden image configures).
+      Prompts if -Password not supplied. Returns the PSCredential.
+    #>
+    [CmdletBinding()]
+    param(
+        [string]$User = 'Administrator',
+        [SecureString]$Password
+    )
+    if (-not $Password) {
+        $Password = Read-Host -Prompt "Enter the node local-admin password for '$User' (stored DPAPI-encrypted)" -AsSecureString
+    }
+    $userFile = Get-LabSecretPath -Name 'node-admin-user'
+    $secFile  = Get-LabSecretPath -Name 'node-admin'
+    Set-Content -Path $userFile -Value $User -Encoding ascii
+    $Password | ConvertFrom-SecureString | Set-Content -Path $secFile -Encoding ascii
+    if (Get-Command Write-Ok -ErrorAction SilentlyContinue) {
+        Write-Ok "Node credential stored (DPAPI): $secFile"
+    }
+    $u = $User; if ($u -notmatch '[\\@]') { $u = ".\$u" }
+    return [System.Management.Automation.PSCredential]::new($u, $Password)
+}
+
+function Get-LabNodeCredential {
+    <#
+      Returns the stored node local-admin PSCredential (DPAPI-decrypted).
+      Precedence: stored secret file > interactive prompt (then persisted).
+      Stages call this instead of prompting, so a single Stage 0 capture is reused.
+        -User    override account (default: stored value, else Administrator)
+        -NoStore do not persist a freshly-prompted password
+    #>
+    [CmdletBinding()]
+    param(
+        [string]$User,
+        [switch]$NoStore
+    )
+    $userFile = Get-LabSecretPath -Name 'node-admin-user'
+    $secFile  = Get-LabSecretPath -Name 'node-admin'
+
+    if (-not $User) {
+        if (Test-Path $userFile) { $User = (Get-Content $userFile -Raw).Trim() }
+        if (-not $User) { $User = 'Administrator' }
+    }
+    $authUser = $User; if ($authUser -notmatch '[\\@]') { $authUser = ".\$authUser" }
+
+    if (Test-Path $secFile) {
+        try {
+            $sec = Get-Content $secFile -Raw | ConvertTo-SecureString -ErrorAction Stop
+            if (Get-Command Write-Info -ErrorAction SilentlyContinue) {
+                Write-Info "Using stored node credential for '$authUser' (DPAPI; value never logged)."
+            }
+            return [System.Management.Automation.PSCredential]::new($authUser, $sec)
+        }
+        catch {
+            if (Get-Command Write-Warn -ErrorAction SilentlyContinue) {
+                Write-Warn "Stored node credential could not be decrypted here (different user/machine?). Re-prompting."
+            }
+        }
+    }
+
+    $sec = Read-Host -Prompt "Enter the node local-admin password for '$authUser'" -AsSecureString
+    if (-not $NoStore) {
+        Set-Content -Path $userFile -Value $User -Encoding ascii
+        $sec | ConvertFrom-SecureString | Set-Content -Path $secFile -Encoding ascii
+    }
+    return [System.Management.Automation.PSCredential]::new($authUser, $sec)
+}

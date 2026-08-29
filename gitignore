@@ -20,3 +20,9 @@ autounattend.iso
 Autounattend.xml
 autounattend.xml
 *autounattend*.iso
+*unattend*.iso
+AzureLocal-unattend.iso
+
+# DPAPI node credential store (per-user/per-machine; never commit)
+*.secret.local
+config/*.secret.local
