@@ -116,7 +116,7 @@ $remoteArc = {
     try {
         if (Test-Path $agentExe) {
             $agent = & $agentExe show 2>$null
-            if ($agent -match 'Connected') { $o.AlreadyConnected = $true; $o.Actions += 'azcmagent already Connected' }
+            if (($agent -join "`n") -match '(?<!dis)connected') { $o.AlreadyConnected = $true; $o.Actions += 'azcmagent already Connected' }
         }
     } catch { }
 
