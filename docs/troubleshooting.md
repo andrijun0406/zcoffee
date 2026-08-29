@@ -18,6 +18,9 @@ Symptom -> cause -> fix, drawn from real Jakarta 01 deployment. For the full nar
 | `BOSS ... disks found: 2  index:` (empty) | WMIC trailing CR counted as a 2nd line | First-valid-index-then-`goto :BossFound`; drop counting |
 | RACADM MSI: error 2711 -> 1603 | `ADDLOCAL=RACADM` feature name invalid | Install with full path + `/qn`, drop `ADDLOCAL` |
 | `Invoke-WebRequest`: "IE engine not available" (Server Core, PS 5.1) | No IE DOM engine | Add `-UseBasicParsing` |
+| `Failed to load XML document ... 'doctype'` during Env Checker | Cosmetic warning from the checker's own child runspace; not on the caller pipeline | Cosmetic only — results unaffected; suppress with `3>$null` on Invoke-Command, else ignore |
+| Stage 4 Validate: `Module missing: Az.Resources / AzsHci.ARCInstaller` | Normal in **Validate** mode; modules install in Register mode | Expected; run `-ArcMode Register -Apply` to install + onboard |
+| Stage 4 Register uses interactive login unexpectedly | `-UseExistingAzLogin` passed, no SP | Pass `-ServicePrincipalId` + `-ServicePrincipalSecret` for unattended (SP takes precedence) |
 | IMAPI2 `REGDB_E_CLASSNOTREG` on Server Core | IMAPI COM not registered | Build ISOs with **oscdimg** (Windows ADK) |
 | `robocopy` exit 16 mirroring a mounted ISO | `/MIR` on read-only root | Use `/E`; call robocopy directly (avoid arg-quoting mangling) |
 | Node unreachable after install (APIPA 169.254.x) | Fresh install has **no IP**; network not yet applied | Network bake (SetupComplete) or iDRAC-console one-liner sets VLAN/IP |

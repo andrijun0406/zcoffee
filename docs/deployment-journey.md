@@ -181,3 +181,20 @@ run against the jump host:
   matched by MAC `34:80:0D:2E:8B:88`, VLAN 230, DNS `.51`, WinRM validated, RDP enabled, success
   marker written, reboot.
 - Verified from jump host: `Test-NetConnection .235 -Port 5985` and `-Port 3389` both True.
+
+
+## Latest milestones (Stages 2-4)
+
+- **Stage 1 confirmed hands-off** on .235 (azljkt01n2): WMIC `DELLBOSS VD` auto-select partitioned
+  the BOSS boot disk with no prompt; post-install `netbootstrap.ps1` matched the mgmt adapter by MAC
+  (`34:80:0D:2E:8B:88`), tagged VLAN 230, set 10.8.230.235/24, enabled WinRM+RDP, wrote
+  `C:\Bootstrap\success.txt`, and rebooted. Node came up reachable on 5985/3389 with zero console.
+- **Stage 2 PASS** after fixing a validator bug: `MediaConnectionState` is numeric (1=Connected), was
+  compared to the string 'Connected' — normalized at collection. Storage `SLOT 2 Port 1/2` links up.
+- **Stage 3 PASS** both nodes: Secure Boot enabled, no pending reboot, SBE staged, TPM ready, roles
+  present, egress 4/4, Environment Checker connectivity green. The checker's `doctype` warning is a
+  cosmetic child-runspace message (suppressed via `3>$null`).
+- **Stage 4 Validate PASS**: providers registered, tokens acquired; "module missing" + "RG does not
+  exist" are normal in Validate (Register mode installs modules + creates the RG).
+- **Service-principal auth added** to Stages 4-5 via `Connect-AzForStage` (precedence: SP secret ->
+  SP cert -> managed identity -> existing login -> device-code) for unattended runs.

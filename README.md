@@ -1,5 +1,19 @@
 # zcoffee: Azure Local 2-Node Lab Deployment (Jakarta 01)
 
+
+## Current status (Jakarta 01)
+
+| Stage | State |
+|---|---|
+| 1 Deploy OS | Confirmed hands-off (WMIC BOSS auto-select + MAC network bake on .232/.235) |
+| 2 Network validate | PASS - mgmt + storage 25GbE links up |
+| 3 Node readiness | PASS both nodes (Secure Boot on, SBE staged, egress 4/4, Env Checker green) |
+| 4 Arc register | Validate PASS; Register pending |
+| 5 Cloud deploy | Pending (needs azuredeploy.json + both nodes Arc-Connected) |
+| 6 Validate cluster | Pending |
+
+Azure auth for Stages 4-5 supports a **service principal** (unattended). See the deployment guide's
+"Service principal" section for creation + roles.
 ## Overview
 Automation scripts and documentation to deploy a **2-node switchless Azure Local 24H2 cluster**
 (Storage Spaces Direct, Hyper-V, Local Identity + Key Vault) on **Dell PowerEdge R650** over a

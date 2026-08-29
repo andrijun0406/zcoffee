@@ -14,8 +14,38 @@ per run. All stages share `ui-common.ps1` (colored steps, per-stage log under `l
 - Dell RACADM (iDRAC Tools) — install on Server Core with full path + `/qn`, **drop `ADDLOCAL`**.
 - Windows ADK **oscdimg** — to build the slipstream ISO (IMAPI2 is unreliable/absent on Core).
 - Az PowerShell (`Az.Accounts`, `Az.Resources`) — Stages 4-5.
+- **Azure service principal** (for unattended Stages 4-5) — see "Service principal" below.
 - Inbound **TCP 8080** allowed on the serving host (ISO HTTP). No Python needed (native server).
 - Golden ISO under `isos/` (gitignored).
+
+---
+
+## Service principal (unattended Azure auth for Stages 4-5)
+
+Stages 4 (Arc) and 5 (deploy) sign in via `Connect-AzForStage` (in `ui-common.ps1`) with this
+precedence: **SP secret -> SP certificate -> managed identity -> `-UseExistingAzLogin` -> device-code**.
+For zero-touch, create a service principal once and pass `-ServicePrincipalId`/`-ServicePrincipalSecret`
+(or `-ServicePrincipalCertThumbprint`). Without those, and with `-UseExistingAzLogin`, the stage reuses
+the interactive session instead.
+
+Create it (as Owner or User Access Administrator on the subscription):
+```powershell
+Connect-AzAccount -TenantId <tenant>
+$sub = '<subscription-id>'; Set-AzContext -Subscription $sub
+$sp = New-AzADServicePrincipal -DisplayName 'zcoffee-azlocal-deployer'
+$appId = $sp.AppId; $secret = $sp.PasswordCredentials.SecretText   # secret shown ONCE
+$scope = "/subscriptions/$sub"
+New-AzRoleAssignment -ApplicationId $appId -RoleDefinitionName 'Azure Connected Machine Onboarding' -Scope $scope
+New-AzRoleAssignment -ApplicationId $appId -RoleDefinitionName 'Azure Connected Machine Resource Administrator' -Scope $scope
+New-AzRoleAssignment -ApplicationId $appId -RoleDefinitionName 'Contributor' -Scope $scope
+New-AzRoleAssignment -ApplicationId $appId -RoleDefinitionName 'User Access Administrator' -Scope $scope
+```
+Roles: **Onboarding** (register Arc servers), **Resource Administrator** (manage Arc machine
+resources), **Contributor** (create RG + deployment resources), **User Access Administrator**
+(Azure Local deployment assigns roles to the cluster managed identity — fails without it).
+Store `appId`/`secret` in the private runbook or a secret store; never commit them. Prefer an SP
+**certificate** over a secret for the fully unattended orchestrator. For least privilege, scope the
+assignments to `azljkt01rg` once it exists.
 
 ---
 
@@ -98,10 +128,18 @@ Prereq: `Install-Module Az.Accounts, Az.Resources -Scope CurrentUser` on the run
 # read-only prerequisite check:
 .\bootstrap-cluster.ps1 -Stage 04-register-arc -ArcMode Validate `
   -SubscriptionId <sub> -TenantId <tenant> -Region southeastasia -ConfigureTrustedHosts -Transport HTTP
-# actual onboarding (reboots nodes during agent phase):
+# actual onboarding (reboots nodes during agent phase) - interactive login:
 .\bootstrap-cluster.ps1 -Stage 04-register-arc -ArcMode Register -Apply -UseExistingAzLogin `
   -SubscriptionId <sub> -TenantId <tenant> -Region southeastasia -ConfigureTrustedHosts -Transport HTTP
+# unattended (service principal) - drop -UseExistingAzLogin; SP takes precedence:
+$spSecret = Read-Host 'SP secret' -AsSecureString
+.\bootstrap-cluster.ps1 -Stage 04-register-arc -ArcMode Register -Apply `
+  -SubscriptionId <sub> -TenantId <tenant> -Region southeastasia `
+  -ServicePrincipalId <appId> -ServicePrincipalSecret $spSecret `
+  -ConfigureTrustedHosts -Transport HTTP
 ```
+Auth note: `-UseExistingAzLogin` alone reuses the interactive session; passing `-ServicePrincipalId`
++ `-ServicePrincipalSecret` (or `-ServicePrincipalCertThumbprint`) makes it fully unattended.
 Registers providers, ensures the RG, acquires tokens on the runner, then runs
 `Invoke-AzStackHciArcInitialization` per node over WinRM. Gate for Stage 5: both nodes `Connected`.
 
@@ -116,6 +154,11 @@ Deploy needs `-DeploymentMode Deploy -EnableDeployment` and a typed `DEPLOY`.
   -SubscriptionId <sub> -TenantId <tenant> -Region southeastasia `
   -TemplateFile ..\arm-templates\azuredeploy.json `
   -ParameterFile ..\arm-templates\ODIN-parameters.json -UseExistingAzLogin
+# unattended deploy (service principal):
+.\bootstrap-cluster.ps1 -Stage 05-deploy-azure-local -DeploymentMode Deploy -EnableDeployment `
+  -SubscriptionId <sub> -TenantId <tenant> -Region southeastasia `
+  -ServicePrincipalId <appId> -ServicePrincipalSecret $spSecret `
+  -TemplateFile ..\arm-templates\azuredeploy.json -ParameterFile ..\arm-templates\ODIN-parameters.json
 ```
 `localAdminUserName`/`localAdminPassword` are injected as runtime overrides (prompted); the param file
 keeps placeholders. Needs the Microsoft/Dell-provided `azuredeploy.json` template in `arm-templates/`.

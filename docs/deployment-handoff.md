@@ -132,3 +132,17 @@ Deploy .86 only:
 - Automatic disk selection: DEFAULT (opt out with -InteractiveDiskSelect) — pending validation on .86.
 - branches/ folder cleanup: try-cifs (dead end) and try-jumphost helpers — decide whether to keep copy-to-jumphost.ps1 and drop the CIFS experiments.
 - Verify hciResourceProviderObjectID in the tenant before Stage 5.
+
+
+## Progress update (latest)
+
+- Stage 1: hands-off confirmed (WMIC DELLBOSS VD auto-select + MAC-based network bake). Nodes come
+  up reachable at .232/.235 with no iDRAC console.
+- Stage 2: PASS (mgmt + storage 25GbE up).
+- Stage 3: PASS both nodes (Secure Boot on, SBE staged, egress 4/4, Env Checker green).
+- Stage 4: Validate PASS; Register pending. Service-principal auth available (`-ServicePrincipalId`
+  + `-ServicePrincipalSecret`/`-ServicePrincipalCertThumbprint`).
+- Stage 5: pending — needs the Microsoft/Dell `azuredeploy.json` ARM template in `arm-templates/`
+  and both nodes Arc-Connected.
+- Next: build zero-touch orchestrator (one SP login, `Wait-NodeReady` across reboots, gates on
+  Arc-Connected + Stage-3-green, `-AutoApprove` for Register + Deploy).
