@@ -51,6 +51,7 @@ param(
     [SecureString]$ServicePrincipalSecret,
     [string]$CertificateThumbprint,
     [switch]$UseManagedIdentity,
+    [string]$AccountId,
     [string]$SubscriptionId,
     [string]$TenantId,
     [string]$ResourceGroupName,
