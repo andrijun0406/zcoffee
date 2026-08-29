@@ -8,24 +8,22 @@
     and projects it into Azure so the Stage 5 ARM template can target the arcNodeResourceIds.
 
     Flow (matches Microsoft/Dell "Register machines with Azure Arc" for Azure Local):
-      1. Jump host: confirm Az modules, sign in to Azure (device auth), select the subscription.
+      1. Jump host: confirm Az modules, sign in to Azure, select the subscription.
       2. Register + verify the required resource providers on the subscription.
-      3. Obtain ARM + Graph access tokens and the signed-in account id (passed to each node).
+      3. Ensure the resource group, obtain the ARM access token and signed-in account id.
       4. Per node over WinRM: ensure AzsHci.ARCInstaller + Az modules, then run
-         Invoke-AzStackHciArcInitialization with the passed tokens (no interactive auth on the node).
-      5. Verify each node shows as a Connected Arc machine and print its resource id
-         (the value Stage 5 needs for arcNodeResourceIds).
+         Invoke-AzStackHciArcInitialization with the passed ARM token (no interactive auth on node).
+      5. Verify each node shows as a Connected Arc machine and print its resource id.
 
     Validate mode (default): steps 1-3 + per-node module/prereq checks (read-only, no registration).
     Register mode (-Apply):  also performs steps 4-5.
 
-    AD-less (Local Identity): node access uses an explicit .\Administrator credential over WinRM,
-    same pattern as Stages 2/3. Azure sign-in is interactive device code by default.
-
 .NOTES
-    Secrets (subscription, tenant) are NOT stored in the repo - pass them as parameters or fill the
-    private lab-config. Arc registration reboots the node when the agent update phase completes;
-    re-run in Register mode is idempotent (already-connected nodes are detected and skipped).
+    Parameter fix: Invoke-AzStackHciArcInitialization on current AzsHci.ARCInstaller builds does NOT
+    accept -GraphAccessToken. Valid auth params are -ArmAccessToken + -AccountID (interactive/user
+    or SP-object-id path) or -SpnCredential (service principal). We build the arg set from the
+    cmdlet's ACTUAL parameters on the node so this survives installer version changes.
+    Arc-init failure is now FATAL (throws) instead of a swallowed warning.
 #>
 [CmdletBinding(SupportsShouldProcess = $true)]
 param(
@@ -110,16 +108,19 @@ $totalSteps = 5 + ($NodeIPs.Count)
 Initialize-Ui -StageName '04-register-arc' -TotalSteps $totalSteps -UseGui:$UseGui
 
 # Node-side Arc initialization (runs ON each node via WinRM; no interactive auth).
+# Auth: build arg set from the cmdlet's ACTUAL parameters. Current builds use
+# -ArmAccessToken + -AccountID; -GraphAccessToken no longer exists.
 $remoteArc = {
-    param($subId, $rg, $tenant, $region, $cloud, $armToken, $graphToken, $accountId, $doRegister)
+    param($subId, $rg, $tenant, $region, $cloud, $armToken, $accountId, $doRegister)
 
-    $o = [ordered]@{ Actions=@(); Warnings=@(); AlreadyConnected=$false; ModulesOk=$false }
+    $o = [ordered]@{ Actions=@(); Warnings=@(); Errors=@(); AlreadyConnected=$false; ModulesOk=$false; Registered=$false }
+
+    $agentExe = "$env:ProgramFiles\AzureConnectedMachineAgent\azcmagent.exe"
 
     # Detect existing Arc connection (idempotent re-runs).
     try {
-        $svc = Get-Service himds -ErrorAction SilentlyContinue
-        if ($svc -and $svc.Status -eq 'Running') {
-            $agent = & "$env:ProgramFiles\AzureConnectedMachineAgent\azcmagent.exe" show 2>$null
+        if (Test-Path $agentExe) {
+            $agent = & $agentExe show 2>$null
             if ($agent -match 'Connected') { $o.AlreadyConnected = $true; $o.Actions += 'azcmagent already Connected' }
         }
     } catch { }
@@ -129,6 +130,7 @@ $remoteArc = {
         foreach ($m in @('Az.Accounts','Az.Resources','AzsHci.ARCInstaller')) {
             if (-not (Get-Module -ListAvailable -Name $m)) {
                 if ($doRegister) {
+                    try { Set-PSRepository PSGallery -InstallationPolicy Trusted -ErrorAction SilentlyContinue } catch { }
                     Install-Module $m -Force -AllowClobber -Scope AllUsers -ErrorAction Stop
                     $o.Actions += "Installed $m"
                 } else {
@@ -137,22 +139,35 @@ $remoteArc = {
             }
         }
         $o.ModulesOk = -not ($o.Warnings | Where-Object { $_ -match 'Module missing' })
-    } catch { $o.Warnings += "module install: $($_.Exception.Message)" }
+    } catch { $o.Errors += "module install: $($_.Exception.Message)" }
 
-    if ($doRegister -and -not $o.AlreadyConnected) {
+    if ($doRegister -and -not $o.AlreadyConnected -and $o.Errors.Count -eq 0) {
         try {
-            Invoke-AzStackHciArcInitialization `
-                -SubscriptionID $subId `
-                -ResourceGroup $rg `
-                -TenantID $tenant `
-                -Region $region `
-                -Cloud $cloud `
-                -ArmAccessToken $armToken `
-                -GraphAccessToken $graphToken `
-                -AccountID $accountId -ErrorAction Stop
+            Import-Module AzsHci.ARCInstaller -ErrorAction Stop
+
+            # Build args from the cmdlet's real parameter set (version-resilient).
+            $cmd = Get-Command Invoke-AzStackHciArcInitialization -ErrorAction Stop
+            $valid = $cmd.Parameters.Keys
+
+            $arc = @{
+                SubscriptionID = $subId
+                ResourceGroup  = $rg
+                TenantID       = $tenant
+                Region         = $region
+                Cloud          = $cloud
+                ArmAccessToken = $armToken
+                AccountID      = $accountId
+            }
+            # Drop any key the installed build doesn't accept (defensive).
+            foreach ($k in @($arc.Keys)) { if ($valid -notcontains $k) { $arc.Remove($k) } }
+            $o.Actions += "Arc init params: $((@($arc.Keys | Sort-Object)) -join ', ')"
+
+            Invoke-AzStackHciArcInitialization @arc -ErrorAction Stop
+            $o.Registered = $true
             $o.Actions += 'Invoke-AzStackHciArcInitialization completed'
         } catch {
-            $o.Warnings += "Arc init: $($_.Exception.Message)"
+            # FATAL - surfaced as an error, not a swallowed warning.
+            $o.Errors += "Arc init FAILED: $($_.Exception.Message)"
         }
     }
 
@@ -212,8 +227,8 @@ try {
         }
     }
 
-    # 3. Ensure resource group + acquire tokens
-    Invoke-Step 'Ensure resource group and acquire access tokens' {
+    # 3. Ensure resource group + acquire ARM token + account id
+    Invoke-Step 'Ensure resource group and acquire access token' {
         $rg = Get-AzResourceGroup -Name $ResourceGroupName -ErrorAction SilentlyContinue
         if (-not $rg) {
             if ($script:registerMode) {
@@ -222,10 +237,20 @@ try {
             } else { Write-Warn "Resource group $ResourceGroupName does not exist (created in Register mode)" }
         } else { Write-Ok "Resource group $ResourceGroupName exists ($($rg.Location))" }
 
-        $script:armToken   = (Get-AzAccessToken -ResourceUrl 'https://management.azure.com' -ErrorAction Stop).Token
-        $script:graphToken = (Get-AzAccessToken -ResourceUrl 'https://graph.microsoft.com' -ErrorAction Stop).Token
-        $script:accountId  = $script:azctx.Account.Id
-        Write-Ok 'ARM + Graph tokens acquired (not logged).'
+        $script:armToken = (Get-AzAccessToken -ResourceUrl 'https://management.azure.com' -ErrorAction Stop).Token
+
+        # AccountID = object id of the signed-in identity (user OR service principal).
+        $acctId = $null
+        try {
+            $u = Get-AzADUser -SignedIn -ErrorAction SilentlyContinue
+            if ($u) { $acctId = $u.Id }
+        } catch { }
+        if (-not $acctId -and $script:ServicePrincipalId) {
+            try { $acctId = (Get-AzADServicePrincipal -ApplicationId $script:ServicePrincipalId -ErrorAction SilentlyContinue).Id } catch { }
+        }
+        if (-not $acctId) { $acctId = $script:azctx.Account.Id }   # fallback: UPN/appId
+        $script:accountId = $acctId
+        Write-Ok 'ARM token + account id acquired (not logged).'
     }
 
     # 4. Node credentials + WinRM
@@ -263,6 +288,7 @@ try {
     }
 
     # 5. Per-node Arc registration / validation
+    $script:arcFailures = @()
     foreach ($ip in $NodeIPs) {
         Invoke-Step "Arc $($Mode.ToLower()): $ip" {
             if (-not $script:reachable[$ip]) { Write-Warn "Skipping $ip (not reachable)."; return }
@@ -275,21 +301,31 @@ try {
 
             $r = Invoke-Command @connArgs -ScriptBlock $remoteArc -ArgumentList @(
                 $script:SubscriptionId, $script:ResourceGroupName, $script:TenantId, $script:Region, $script:Cloud,
-                $script:armToken, $script:graphToken, $script:accountId, [bool]$script:registerMode)
+                $script:armToken, $script:accountId, [bool]$script:registerMode)
 
             foreach ($a in $r.Actions)  { Write-Ok  $a }
             foreach ($w in $r.Warnings) { Write-Warn $w }
+            foreach ($e in $r.Errors)   { Write-Err  $e; $script:arcFailures += "$ip : $e" }
 
             if (-not $script:registerMode) {
                 if ($r.ModulesOk) { Write-Ok "$ip prerequisites OK (modules present)" }
                 else { Write-Warn "$ip missing Arc modules (Register mode installs them)" }
+            } else {
+                if ($r.AlreadyConnected) { Write-Ok "$ip already Arc-connected (skipped)" }
+                elseif ($r.Registered)   { Write-Ok "$ip Arc initialization succeeded" }
+                elseif ($r.Errors.Count -eq 0) { Write-Warn "$ip did not register and reported no error (investigate)" }
             }
         }
     }
 
+    # Register mode: fail loudly if any node's Arc init errored.
+    if ($registerMode -and $script:arcFailures.Count -gt 0) {
+        throw "Arc registration failed on: $($script:arcFailures -join ' | ')"
+    }
+
     # 6. Post-registration verification (Register mode)
     if ($registerMode) {
-        Write-Info 'Verifying Arc-connected machines in Azure...'
+        Write-Info 'Verifying Arc-connected machines in Azure (may take a few minutes to appear)...'
         Import-Module Az.ConnectedMachine -ErrorAction SilentlyContinue
         foreach ($ip in $NodeIPs) {
             $name = if ($nodeNameByIp.ContainsKey($ip)) { $nodeNameByIp[$ip] } else { $ip }
@@ -297,7 +333,7 @@ try {
                 $m = Get-AzConnectedMachine -ResourceGroupName $ResourceGroupName -Name $name -ErrorAction Stop
                 Write-Ok "$name : $($m.Status) - $($m.Id)"
             } catch {
-                Write-Warn "$name not yet visible in Azure ($ResourceGroupName). It may still be onboarding/rebooting."
+                Write-Warn "$name not yet visible in Azure ($ResourceGroupName). It may still be onboarding/rebooting - re-check with Get-AzConnectedMachine."
             }
         }
         Write-Info 'Collect the resource ids above into arcNodeResourceIds for the Stage 5 ARM parameters.'
