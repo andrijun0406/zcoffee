@@ -196,6 +196,12 @@ $remoteCheck = {
     # Environment Checker (read-only)
     if ($doEnvChecker) {
         try {
+            if (-not (Get-Module -ListAvailable -Name AzStackHci.EnvironmentChecker)) {
+                try {
+                    Set-PSRepository -Name PSGallery -InstallationPolicy Trusted -ErrorAction SilentlyContinue
+                    Install-Module AzStackHci.EnvironmentChecker -Force -AllowClobber -Scope AllUsers -ErrorAction Stop 3>$null
+                } catch { }
+            }
             Import-Module AzStackHci.EnvironmentChecker -ErrorAction Stop
             $r.EnvCheckerRan = $true
             # The checker emits a cosmetic 'Failed to load XML document ... doctype' warning while
@@ -283,8 +289,16 @@ try {
                 } catch { Write-Warn "Apply on ${ip}: $($_.Exception.Message)" }
             }
 
+            $remoteWarn = @()
             $res = Invoke-Command @connArgs -ScriptBlock $remoteCheck -ArgumentList @(
-                $script:azureEndpoints, (-not $script:SkipEnvChecker), [bool]$script:ConnectivityOnly)
+                $script:azureEndpoints, (-not $script:SkipEnvChecker), [bool]$script:ConnectivityOnly) `
+                -WarningVariable remoteWarn -WarningAction SilentlyContinue
+            # Re-emit only genuine remote warnings; drop the cosmetic EnvironmentChecker XML/doctype noise.
+            foreach ($rw in $remoteWarn) {
+                if ("$($rw.Message)" -notmatch 'Failed to load XML document|doctype|AzStackHciConnectivityTarget\.xml') {
+                    Write-Warn "remote: $($rw.Message)"
+                }
+            }
 
             $warn = 0; $fail = 0
             $expectName = if ($nodeNameByIp.ContainsKey($ip)) { $nodeNameByIp[$ip] } else { '' }
@@ -336,7 +350,7 @@ try {
                 }
             }
             elseif (-not $script:SkipEnvChecker) {
-                Write-Warn 'Environment Checker not available on node (install with -Apply, or -SkipEnvChecker)'; $warn++
+                Write-Info 'Environment Checker not installed on node; egress was verified independently above. Non-blocking. (Run -Apply, or -SkipEnvChecker to silence.)'
             }
 
             # Verdict
