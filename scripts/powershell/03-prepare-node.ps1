@@ -204,10 +204,17 @@ $remoteCheck = {
             }
             Import-Module AzStackHci.EnvironmentChecker -ErrorAction Stop
             $r.EnvCheckerRan = $true
-            # The checker emits a cosmetic 'Failed to load XML document ... doctype' warning while
-            # parsing one of its own temp files. Suppress the warning stream (3>$null) and silence
-            # warnings; results in $res are unaffected.
-            $res = Invoke-AzStackHciConnectivityValidation -PassThru -ErrorAction SilentlyContinue -WarningAction SilentlyContinue 3>$null
+            # The checker writes the cosmetic 'Failed to load XML document ... doctype' text from an
+            # INTERNAL child runspace, so -WarningAction / 3>$null on the direct call do NOT catch it.
+            # Run it in a background job and receive ONLY the success stream (every other stream -> null);
+            # that single funnel point strips the noise no matter which stream the module used.
+            $envJob = Start-Job -ScriptBlock {
+                Import-Module AzStackHci.EnvironmentChecker -ErrorAction SilentlyContinue
+                Invoke-AzStackHciConnectivityValidation -PassThru -ErrorAction SilentlyContinue
+            }
+            $null = Wait-Job $envJob
+            $res = Receive-Job $envJob 2>$null 3>$null 4>$null 5>$null 6>$null
+            Remove-Job $envJob -Force -ErrorAction SilentlyContinue
             if ($res) {
                 $r.EnvChecker = @($res | ForEach-Object {
                     [pscustomobject]@{ Name = $_.Name; Status = "$($_.Status)" }
