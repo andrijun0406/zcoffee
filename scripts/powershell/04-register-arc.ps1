@@ -111,7 +111,7 @@ Initialize-Ui -StageName '04-register-arc' -TotalSteps $totalSteps -UseGui:$UseG
 # Auth: build arg set from the cmdlet's ACTUAL parameters. Current builds use
 # -ArmAccessToken + -AccountID; -GraphAccessToken no longer exists.
 $remoteArc = {
-    param($subId, $rg, $tenant, $region, $cloud, $armToken, $accountId, $doRegister)
+    param($subId, $rg, $tenant, $region, $cloud, $armToken, $accountId, $doRegister, $spAppId, $spSecret)
 
     $o = [ordered]@{ Actions=@(); Warnings=@(); Errors=@(); AlreadyConnected=$false; ModulesOk=$false; Registered=$false }
 
@@ -155,14 +155,23 @@ $remoteArc = {
                 TenantID       = $tenant
                 Region         = $region
                 Cloud          = $cloud
-                ArmAccessToken = $armToken
-                AccountID      = $accountId
+            }
+            if ($spAppId -and $spSecret -and ($valid -contains 'SpnCredential')) {
+                # Service-principal onboarding (recommended - avoids guest-user AccountID issues).
+                $spSec = ConvertTo-SecureString $spSecret -AsPlainText -Force
+                $arc['SpnCredential'] = [System.Management.Automation.PSCredential]::new($spAppId, $spSec)
+                $o.Actions += 'Arc auth: service principal (SpnCredential)'
+            } else {
+                # Fallback: ARM token + signed-in account object id.
+                $arc['ArmAccessToken'] = $armToken
+                $arc['AccountID']      = $accountId
+                $o.Actions += 'Arc auth: ArmAccessToken + AccountID'
             }
             # Drop any key the installed build doesn't accept (defensive).
             foreach ($k in @($arc.Keys)) { if ($valid -notcontains $k) { $arc.Remove($k) } }
             $o.Actions += "Arc init params: $((@($arc.Keys | Sort-Object)) -join ', ')"
 
-            Invoke-AzStackHciArcInitialization @arc -ErrorAction Stop
+            $null = Invoke-AzStackHciArcInitialization @arc -ErrorAction Stop *>&1
             $o.Registered = $true
             $o.Actions += 'Invoke-AzStackHciArcInitialization completed'
         } catch {
@@ -250,6 +259,17 @@ try {
         }
         if (-not $acctId) { $acctId = $script:azctx.Account.Id }   # fallback: UPN/appId
         $script:accountId = $acctId
+
+        # If a service principal was supplied, pass it to the nodes for SpnCredential onboarding.
+        $script:spAppIdForNode = $null
+        $script:spSecretForNode = $null
+        if ($script:ServicePrincipalId -and $script:ServicePrincipalSecret) {
+            $script:spAppIdForNode = $script:ServicePrincipalId
+            $b2 = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($script:ServicePrincipalSecret)
+            try { $script:spSecretForNode = [Runtime.InteropServices.Marshal]::PtrToStringBSTR($b2) }
+            finally { [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($b2) }
+            Write-Info 'Service principal supplied - nodes will onboard via SpnCredential.'
+        }
         Write-Ok 'ARM token + account id acquired (not logged).'
     }
 
@@ -301,7 +321,12 @@ try {
 
             $r = Invoke-Command @connArgs -ScriptBlock $remoteArc -ArgumentList @(
                 $script:SubscriptionId, $script:ResourceGroupName, $script:TenantId, $script:Region, $script:Cloud,
-                $script:armToken, $script:accountId, [bool]$script:registerMode)
+                $script:armToken, $script:accountId, [bool]$script:registerMode,
+                $script:spAppIdForNode, $script:spSecretForNode)
+
+            # The Arc installer streams status objects; keep only our result object.
+            $r = @($r) | Where-Object { $_ -is [pscustomobject] -and $_.PSObject.Properties.Name -contains 'Actions' } | Select-Object -Last 1
+            if (-not $r) { throw "No Arc result object returned from $ip (scriptblock output was unexpected)." }
 
             foreach ($a in $r.Actions)  { Write-Ok  $a }
             foreach ($w in $r.Warnings) { Write-Warn $w }
