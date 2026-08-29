@@ -299,7 +299,7 @@ try {
             $remoteWarn = @()
             $res = Invoke-Command @connArgs -ScriptBlock $remoteCheck -ArgumentList @(
                 $script:azureEndpoints, (-not $script:SkipEnvChecker), [bool]$script:ConnectivityOnly) `
-                -WarningVariable remoteWarn -WarningAction SilentlyContinue
+                -WarningVariable remoteWarn -WarningAction SilentlyContinue 3>$null
             # Re-emit only genuine remote warnings; drop the cosmetic EnvironmentChecker XML/doctype noise.
             foreach ($rw in $remoteWarn) {
                 if ("$($rw.Message)" -notmatch 'Failed to load XML document|doctype|AzStackHciConnectivityTarget\.xml') {

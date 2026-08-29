@@ -354,3 +354,56 @@ function Complete-GuiWindow {
     }
     [System.Windows.Forms.Application]::DoEvents()
 }
+
+function Connect-AzForStage {
+    <#
+      Unified Azure sign-in for Stages 4/5. Precedence:
+        1. -ServicePrincipalId + -ServicePrincipalSecret  (unattended, secret)
+        2. -ServicePrincipalId + -CertificateThumbprint   (unattended, cert)
+        3. -UseManagedIdentity                            (jump host is an Azure VM/Arc box)
+        4. -UseExistingAzLogin                            (reuse current Az context)
+        5. interactive device-code                         (fallback)
+      Returns the Az context. Never logs the secret.
+    #>
+    param(
+        [Parameter(Mandatory)][string]$TenantId,
+        [Parameter(Mandatory)][string]$SubscriptionId,
+        [string]$ServicePrincipalId,
+        [SecureString]$ServicePrincipalSecret,
+        [string]$CertificateThumbprint,
+        [switch]$UseManagedIdentity,
+        [switch]$UseExistingAzLogin
+    )
+    if (-not (Get-Module -ListAvailable -Name Az.Accounts)) {
+        throw 'Az.Accounts not found on this host. Install-Module Az.Accounts -Scope CurrentUser'
+    }
+    Import-Module Az.Accounts -ErrorAction Stop
+
+    $ctx = $null
+    if ($ServicePrincipalId -and $ServicePrincipalSecret) {
+        Write-Info "Service-principal sign-in (secret) as appId $ServicePrincipalId (unattended)."
+        $cred = [System.Management.Automation.PSCredential]::new($ServicePrincipalId, $ServicePrincipalSecret)
+        Connect-AzAccount -ServicePrincipal -Tenant $TenantId -Credential $cred -ErrorAction Stop | Out-Null
+    }
+    elseif ($ServicePrincipalId -and $CertificateThumbprint) {
+        Write-Info "Service-principal sign-in (certificate) as appId $ServicePrincipalId (unattended)."
+        Connect-AzAccount -ServicePrincipal -Tenant $TenantId -ApplicationId $ServicePrincipalId `
+            -CertificateThumbprint $CertificateThumbprint -ErrorAction Stop | Out-Null
+    }
+    elseif ($UseManagedIdentity) {
+        Write-Info 'Managed-identity sign-in (unattended).'
+        Connect-AzAccount -Identity -ErrorAction Stop | Out-Null
+    }
+    elseif ($UseExistingAzLogin) {
+        $ctx = Get-AzContext -ErrorAction SilentlyContinue
+        if ($ctx) { Write-Info "Reusing existing Az context ($($ctx.Account.Id))." }
+    }
+    if (-not $ctx -and -not ($ServicePrincipalId -or $UseManagedIdentity)) {
+        if (-not (Get-AzContext -ErrorAction SilentlyContinue)) {
+            Write-Info 'Launching device-code sign-in (follow the URL + code)...'
+            Connect-AzAccount -TenantId $TenantId -UseDeviceAuthentication -ErrorAction Stop | Out-Null
+        }
+    }
+    Set-AzContext -Subscription $SubscriptionId -Tenant $TenantId -ErrorAction Stop | Out-Null
+    return Get-AzContext
+}

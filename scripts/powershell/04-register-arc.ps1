@@ -52,6 +52,11 @@ param(
     [switch]$Apply,
     # Use an existing Az context on the jump host instead of interactive device sign-in.
     [switch]$UseExistingAzLogin,
+    # Unattended service-principal / managed-identity auth (zero-touch).
+    [string]$ServicePrincipalId,
+    [SecureString]$ServicePrincipalSecret,
+    [string]$CertificateThumbprint,
+    [switch]$UseManagedIdentity,
     [switch]$UseGui
 )
 
@@ -164,14 +169,10 @@ try {
         if (-not $SubscriptionId) { throw 'SubscriptionId is required (pass -SubscriptionId or fill lab-config/private runbook).' }
         if (-not $TenantId)       { throw 'TenantId is required (pass -TenantId).' }
 
-        $ctx = $null
-        if ($script:UseExistingAzLogin) { $ctx = Get-AzContext -ErrorAction SilentlyContinue }
-        if (-not $ctx) {
-            Write-Info 'Launching device-code sign-in (follow the URL + code)...'
-            Connect-AzAccount -TenantId $TenantId -UseDeviceAuthentication -ErrorAction Stop | Out-Null
-        }
-        Set-AzContext -Subscription $SubscriptionId -Tenant $TenantId -ErrorAction Stop | Out-Null
-        $script:azctx = Get-AzContext
+        $script:azctx = Connect-AzForStage -TenantId $TenantId -SubscriptionId $SubscriptionId `
+            -ServicePrincipalId $script:ServicePrincipalId -ServicePrincipalSecret $script:ServicePrincipalSecret `
+            -CertificateThumbprint $script:CertificateThumbprint -UseManagedIdentity:$script:UseManagedIdentity `
+            -UseExistingAzLogin:$script:UseExistingAzLogin
         Write-Ok "Signed in as $($script:azctx.Account.Id); subscription $SubscriptionId; region $Region."
     }
 

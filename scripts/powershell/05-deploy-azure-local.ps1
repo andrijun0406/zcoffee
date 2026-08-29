@@ -41,6 +41,11 @@ param(
     [string]$DeploymentName,
     [string]$Region,
     [switch]$UseExistingAzLogin,
+    # Unattended service-principal / managed-identity auth (zero-touch).
+    [string]$ServicePrincipalId,
+    [SecureString]$ServicePrincipalSecret,
+    [string]$CertificateThumbprint,
+    [switch]$UseManagedIdentity,
     # Local admin credential that exists on ALL nodes (used by the deployment).
     [string]$LocalAdminUser,
     [SecureString]$LocalAdminPassword,
@@ -98,20 +103,11 @@ try {
 
     # -----------------------------------------------------------------
     Invoke-Step 'Establish Azure context and select subscription' {
-        $ctx = $null
-        if ($script:UseExistingAzLogin) {
-            $ctx = Get-AzContext -ErrorAction SilentlyContinue
-            if (-not $ctx) { Write-Warn 'No existing Az context; falling back to device-code sign-in.' }
-        }
-        if (-not $ctx) {
-            $connectArgs = @{ UseDeviceAuthentication = $true; ErrorAction = 'Stop' }
-            if ($script:TenantId) { $connectArgs['Tenant'] = $script:TenantId }
-            $connectArgs['Subscription'] = $script:SubscriptionId
-            Write-Info 'Launching device-code sign-in (follow the URL + code)...'
-            Connect-AzAccount @connectArgs | Out-Null
-        }
-        Set-AzContext -Subscription $script:SubscriptionId -ErrorAction Stop | Out-Null
-        $ctx = Get-AzContext
+        if (-not $script:TenantId) { throw 'TenantId is required (pass -TenantId).' }
+        $ctx = Connect-AzForStage -TenantId $script:TenantId -SubscriptionId $script:SubscriptionId `
+            -ServicePrincipalId $script:ServicePrincipalId -ServicePrincipalSecret $script:ServicePrincipalSecret `
+            -CertificateThumbprint $script:CertificateThumbprint -UseManagedIdentity:$script:UseManagedIdentity `
+            -UseExistingAzLogin:$script:UseExistingAzLogin
         if ($script:TenantId -and $ctx.Tenant.Id -ne $script:TenantId) {
             throw "Tenant mismatch. Expected $script:TenantId; context is $($ctx.Tenant.Id)."
         }
