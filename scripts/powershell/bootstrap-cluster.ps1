@@ -52,6 +52,7 @@ param(
     [string]$CertificateThumbprint,
     [switch]$UseManagedIdentity,
     [string]$AccountId,
+    [switch]$ForceReregister,
     [string]$SubscriptionId,
     [string]$TenantId,
     [string]$ResourceGroupName,
