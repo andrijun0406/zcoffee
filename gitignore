@@ -1,28 +1,34 @@
-# Golden Image ISOs (never commit)
-isos/
+# G*lden Image ISOs (never commit)
+iso*/
 *.iso
 
-# Run logs
+# Installers
+*.exe
+*.msi
+*# Run logs
 logs/
+scripts/powershel*/logs/
+*.log
 
-# Real deployment parameter files containing tenant/subscription/secrets
-arm-templates/ODIN-parameters.json
-arm-templates/*.local.json
-*.local.json
+# Real deployment pa*ameter files containing tenant/sub*cription/secrets
+scripts/arm-templ*tes/odin-parameters.json
+scripts/a*m-templates/*.local.json
+*.local.j*on
 
-# Local admin / secret material
+# Local admin / secret materia*
 *.secret
-*.pfx
-*.key
-
-# Unattended install answer-file artifacts (contain obfuscated admin password)
-autounattend.iso
-Autounattend.xml
-autounattend.xml
-*autounattend*.iso
-*unattend*.iso
-AzureLocal-unattend.iso
-
-# DPAPI node credential store (per-user/per-machine; never commit)
 *.secret.local
+*.pfx
+*.k*y
+
+# Unattended install answer-fil* artifacts
+autounattend.iso
+Autoun*ttend.xml
+autounattend.xml
+*autoun*ttend*.iso
+*unattend*.iso
+AzureLoc*l-unattend.iso
+
+# DPAPI node crede*tial store
 config/*.secret.local
+`*

@@ -1,0 +1,28 @@
+# Golden Image ISOs (never commit)
+isos/
+*.iso
+
+# Run logs
+logs/
+
+# Real deployment parameter files containing tenant/subscription/secrets
+arm-templates/ODIN-parameters.json
+arm-templates/*.local.json
+*.local.json
+
+# Local admin / secret material
+*.secret
+*.pfx
+*.key
+
+# Unattended install answer-file artifacts (contain obfuscated admin password)
+autounattend.iso
+Autounattend.xml
+autounattend.xml
+*autounattend*.iso
+*unattend*.iso
+AzureLocal-unattend.iso
+
+# DPAPI node credential store (per-user/per-machine; never commit)
+*.secret.local
+config/*.secret.local
