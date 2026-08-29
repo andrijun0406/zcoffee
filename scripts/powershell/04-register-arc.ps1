@@ -3,27 +3,25 @@
     Stage 4 - Register both nodes with Azure Arc (Arc-enabled servers) for Azure Local deployment.
 
 .DESCRIPTION
-    Runs AFTER Stage 3 (node readiness green, Secure Boot re-enabled, no pending reboot) and BEFORE
-    Stage 5 (cloud deployment). Arc registration installs the Connected Machine agent on each node
-    and projects it into Azure so the Stage 5 ARM template can target the arcNodeResourceIds.
+    Runs AFTER Stage 3 and BEFORE Stage 5. Installs the Connected Machine agent on each node and
+    projects it into Azure so the Stage 5 ARM template can target the arcNodeResourceIds.
 
-    Flow (matches Microsoft/Dell "Register machines with Azure Arc" for Azure Local):
-      1. Jump host: confirm Az modules, sign in to Azure, select the subscription.
-      2. Register + verify the required resource providers on the subscription.
-      3. Ensure the resource group, obtain the ARM access token and signed-in account id.
-      4. Per node over WinRM: ensure AzsHci.ARCInstaller + Az modules, then run
-         Invoke-AzStackHciArcInitialization with the passed ARM token (no interactive auth on node).
-      5. Verify each node shows as a Connected Arc machine and print its resource id.
+    Auth model:
+      - Jump host signs into Azure as a USER (interactive/device) or as the SERVICE PRINCIPAL
+        (secret or certificate) via Connect-AzForStage.
+      - Node onboarding uses one of:
+          * -SpnCredential            (SP + SECRET only)
+          * -ArmAccessToken+-AccountID (user token, or SP token for a CERT SP)
+      - -GraphAccessToken is NOT used (removed from current AzsHci.ARCInstaller builds).
 
-    Validate mode (default): steps 1-3 + per-node module/prereq checks (read-only, no registration).
-    Register mode (-Apply):  also performs steps 4-5.
+    Certificate SP note: a cert-based SP has no secret, so SpnCredential is unavailable and the
+    node onboards with the SP's ARM token + the SP OBJECT ID as AccountID. Because resolving the
+    SP object id from inside an SP context may require directory-read the SP lacks, pass -AccountId
+    explicitly (Stage 0 prints it) to make this deterministic.
 
 .NOTES
-    Parameter fix: Invoke-AzStackHciArcInitialization on current AzsHci.ARCInstaller builds does NOT
-    accept -GraphAccessToken. Valid auth params are -ArmAccessToken + -AccountID (interactive/user
-    or SP-object-id path) or -SpnCredential (service principal). We build the arg set from the
-    cmdlet's ACTUAL parameters on the node so this survives installer version changes.
-    Arc-init failure is now FATAL (throws) instead of a swallowed warning.
+    Arc-init failure is FATAL (throws), not a swallowed warning. Args are built from the cmdlet's
+    ACTUAL parameters on the node so this survives installer version changes.
 #>
 [CmdletBinding(SupportsShouldProcess = $true)]
 param(
@@ -55,6 +53,9 @@ param(
     [SecureString]$ServicePrincipalSecret,
     [string]$CertificateThumbprint,
     [switch]$UseManagedIdentity,
+    # Explicit AccountID (object id of the signed-in identity). Recommended for CERT service
+    # principals where directory-read to resolve the SP object id may be unavailable.
+    [string]$AccountId,
     [switch]$UseGui
 )
 
@@ -87,7 +88,6 @@ if (-not $Port) { $Port = if ($Transport -eq 'HTTPS') { 5986 } else { 5985 } }
 $authUser = $LocalAdminUser
 if ($authUser -notmatch '[\\@]') { $authUser = ".\$authUser" }
 
-# Resource providers required for Azure Local + Arc.
 $requiredProviders = @(
     'Microsoft.HybridCompute',
     'Microsoft.GuestConfiguration',
@@ -103,21 +103,16 @@ $requiredProviders = @(
 $registerMode = ($Mode -eq 'Register')
 if ($registerMode -and -not $Apply) { throw 'Register mode requires -Apply (safety gate).' }
 
-# steps: azure-signin + providers + tokens + creds + winrm + (per node)
 $totalSteps = 5 + ($NodeIPs.Count)
 Initialize-Ui -StageName '04-register-arc' -TotalSteps $totalSteps -UseGui:$UseGui
 
-# Node-side Arc initialization (runs ON each node via WinRM; no interactive auth).
-# Auth: build arg set from the cmdlet's ACTUAL parameters. Current builds use
-# -ArmAccessToken + -AccountID; -GraphAccessToken no longer exists.
+# Node-side Arc initialization (runs ON each node via WinRM).
 $remoteArc = {
     param($subId, $rg, $tenant, $region, $cloud, $armToken, $accountId, $doRegister, $spAppId, $spSecret)
 
     $o = [ordered]@{ Actions=@(); Warnings=@(); Errors=@(); AlreadyConnected=$false; ModulesOk=$false; Registered=$false }
-
     $agentExe = "$env:ProgramFiles\AzureConnectedMachineAgent\azcmagent.exe"
 
-    # Detect existing Arc connection (idempotent re-runs).
     try {
         if (Test-Path $agentExe) {
             $agent = & $agentExe show 2>$null
@@ -125,7 +120,6 @@ $remoteArc = {
         }
     } catch { }
 
-    # Ensure required modules present.
     try {
         foreach ($m in @('Az.Accounts','Az.Resources','AzsHci.ARCInstaller')) {
             if (-not (Get-Module -ListAvailable -Name $m)) {
@@ -144,8 +138,6 @@ $remoteArc = {
     if ($doRegister -and -not $o.AlreadyConnected -and $o.Errors.Count -eq 0) {
         try {
             Import-Module AzsHci.ARCInstaller -ErrorAction Stop
-
-            # Build args from the cmdlet's real parameter set (version-resilient).
             $cmd = Get-Command Invoke-AzStackHciArcInitialization -ErrorAction Stop
             $valid = $cmd.Parameters.Keys
 
@@ -157,17 +149,14 @@ $remoteArc = {
                 Cloud          = $cloud
             }
             if ($spAppId -and $spSecret -and ($valid -contains 'SpnCredential')) {
-                # Service-principal onboarding (recommended - avoids guest-user AccountID issues).
                 $spSec = ConvertTo-SecureString $spSecret -AsPlainText -Force
                 $arc['SpnCredential'] = [System.Management.Automation.PSCredential]::new($spAppId, $spSec)
                 $o.Actions += 'Arc auth: service principal (SpnCredential)'
             } else {
-                # Fallback: ARM token + signed-in account object id.
                 $arc['ArmAccessToken'] = $armToken
                 $arc['AccountID']      = $accountId
-                $o.Actions += 'Arc auth: ArmAccessToken + AccountID'
+                $o.Actions += "Arc auth: ArmAccessToken + AccountID ($accountId)"
             }
-            # Drop any key the installed build doesn't accept (defensive).
             foreach ($k in @($arc.Keys)) { if ($valid -notcontains $k) { $arc.Remove($k) } }
             $o.Actions += "Arc init params: $((@($arc.Keys | Sort-Object)) -join ', ')"
 
@@ -175,7 +164,6 @@ $remoteArc = {
             $o.Registered = $true
             $o.Actions += 'Invoke-AzStackHciArcInitialization completed'
         } catch {
-            # FATAL - surfaced as an error, not a swallowed warning.
             $o.Errors += "Arc init FAILED: $($_.Exception.Message)"
         }
     }
@@ -184,14 +172,13 @@ $remoteArc = {
 }
 
 try {
-    # 1. Azure sign-in on the jump host
     Invoke-Step 'Sign in to Azure and select subscription' {
         if (-not (Get-Module -ListAvailable -Name Az.Accounts)) {
             throw 'Az.Accounts not found on this host. Install-Module Az.Accounts -Scope CurrentUser'
         }
         Import-Module Az.Accounts -ErrorAction Stop
-        if (-not $SubscriptionId) { throw 'SubscriptionId is required (pass -SubscriptionId or fill lab-config/private runbook).' }
-        if (-not $TenantId)       { throw 'TenantId is required (pass -TenantId).' }
+        if (-not $SubscriptionId) { throw 'SubscriptionId is required.' }
+        if (-not $TenantId)       { throw 'TenantId is required.' }
 
         $script:azctx = Connect-AzForStage -TenantId $TenantId -SubscriptionId $SubscriptionId `
             -ServicePrincipalId $script:ServicePrincipalId -ServicePrincipalSecret $script:ServicePrincipalSecret `
@@ -200,13 +187,11 @@ try {
         Write-Ok "Signed in as $($script:azctx.Account.Id); subscription $SubscriptionId; region $Region."
     }
 
-    # 2. Resource providers
     Invoke-Step 'Register and verify required resource providers' {
         Import-Module Az.Resources -ErrorAction SilentlyContinue
         $notReady = @()
         foreach ($p in $requiredProviders) {
-            $rp = Get-AzResourceProvider -ProviderNamespace $p -ErrorAction SilentlyContinue |
-                  Select-Object -First 1
+            $rp = Get-AzResourceProvider -ProviderNamespace $p -ErrorAction SilentlyContinue | Select-Object -First 1
             $state = if ($rp) { $rp.RegistrationState } else { 'NotFound' }
             if ($state -ne 'Registered') {
                 if ($script:registerMode) {
@@ -236,7 +221,6 @@ try {
         }
     }
 
-    # 3. Ensure resource group + acquire ARM token + account id
     Invoke-Step 'Ensure resource group and acquire access token' {
         $rg = Get-AzResourceGroup -Name $ResourceGroupName -ErrorAction SilentlyContinue
         if (-not $rg) {
@@ -246,21 +230,30 @@ try {
             } else { Write-Warn "Resource group $ResourceGroupName does not exist (created in Register mode)" }
         } else { Write-Ok "Resource group $ResourceGroupName exists ($($rg.Location))" }
 
-        $script:armToken = (Get-AzAccessToken -ResourceUrl 'https://management.azure.com' -ErrorAction Stop).Token
+        $tok = (Get-AzAccessToken -ResourceUrl 'https://management.azure.com' -ErrorAction Stop).Token
+        if ($tok -is [System.Security.SecureString]) {
+            $bt = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($tok)
+            try { $tok = [Runtime.InteropServices.Marshal]::PtrToStringBSTR($bt) } finally { [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($bt) }
+        }
+        $script:armToken = $tok
 
-        # AccountID = object id of the signed-in identity (user OR service principal).
+        # AccountID resolution: explicit param > SP object-id lookup > signed-in user > context.
         $acctId = $null
-        try {
-            $u = Get-AzADUser -SignedIn -ErrorAction SilentlyContinue
-            if ($u) { $acctId = $u.Id }
-        } catch { }
+        if ($script:AccountId) {
+            $acctId = $script:AccountId
+            Write-Info 'Using explicit -AccountId (recommended for certificate SPs).'
+        }
         if (-not $acctId -and $script:ServicePrincipalId) {
             try { $acctId = (Get-AzADServicePrincipal -ApplicationId $script:ServicePrincipalId -ErrorAction SilentlyContinue).Id } catch { }
         }
-        if (-not $acctId) { $acctId = $script:azctx.Account.Id }   # fallback: UPN/appId
+        if (-not $acctId) {
+            try { $u = Get-AzADUser -SignedIn -ErrorAction SilentlyContinue; if ($u) { $acctId = $u.Id } } catch { }
+        }
+        if (-not $acctId) { $acctId = $script:azctx.Account.Id }
         $script:accountId = $acctId
+        Write-Info "AccountID resolved to: $acctId"
 
-        # If a service principal was supplied, pass it to the nodes for SpnCredential onboarding.
+        # SpnCredential path only when an SP SECRET is available (not for cert SPs).
         $script:spAppIdForNode = $null
         $script:spSecretForNode = $null
         if ($script:ServicePrincipalId -and $script:ServicePrincipalSecret) {
@@ -268,12 +261,13 @@ try {
             $b2 = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($script:ServicePrincipalSecret)
             try { $script:spSecretForNode = [Runtime.InteropServices.Marshal]::PtrToStringBSTR($b2) }
             finally { [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($b2) }
-            Write-Info 'Service principal supplied - nodes will onboard via SpnCredential.'
+            Write-Info 'SP secret supplied - nodes will onboard via SpnCredential.'
+        } elseif ($script:ServicePrincipalId) {
+            Write-Info 'Certificate SP - nodes will onboard via SP ARM token + AccountID.'
         }
         Write-Ok 'ARM token + account id acquired (not logged).'
     }
 
-    # 4. Node credentials + WinRM
     Invoke-Step 'Resolve node credentials and WinRM connectivity' {
         if (-not $b.ContainsKey('LocalAdminPassword') -or $null -eq $script:LocalAdminPassword) {
             $script:LocalAdminPassword = Read-Host -Prompt "Enter the local admin password for '$script:authUser' on the nodes" -AsSecureString
@@ -307,7 +301,6 @@ try {
         if (-not ($script:reachable.Values | Where-Object { $_ })) { throw 'No node reachable over WinRM.' }
     }
 
-    # 5. Per-node Arc registration / validation
     $script:arcFailures = @()
     foreach ($ip in $NodeIPs) {
         Invoke-Step "Arc $($Mode.ToLower()): $ip" {
@@ -324,7 +317,6 @@ try {
                 $script:armToken, $script:accountId, [bool]$script:registerMode,
                 $script:spAppIdForNode, $script:spSecretForNode)
 
-            # The Arc installer streams status objects; keep only our result object.
             $r = @($r) | Where-Object { $_ -is [pscustomobject] -and $_.PSObject.Properties.Name -contains 'Actions' } | Select-Object -Last 1
             if (-not $r) { throw "No Arc result object returned from $ip (scriptblock output was unexpected)." }
 
@@ -343,12 +335,10 @@ try {
         }
     }
 
-    # Register mode: fail loudly if any node's Arc init errored.
     if ($registerMode -and $script:arcFailures.Count -gt 0) {
         throw "Arc registration failed on: $($script:arcFailures -join ' | ')"
     }
 
-    # 6. Post-registration verification (Register mode)
     if ($registerMode) {
         Write-Info 'Verifying Arc-connected machines in Azure (may take a few minutes to appear)...'
         Import-Module Az.ConnectedMachine -ErrorAction SilentlyContinue
