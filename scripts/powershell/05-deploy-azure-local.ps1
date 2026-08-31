@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
     Stage 5 - Azure Local CLOUD DEPLOYMENT via ARM. This is the stage that actually builds the
     cluster: SET switch, storage vNICs, RDMA/iWARP, storage auto-IP, Storage Spaces Direct, the
@@ -174,7 +174,9 @@ try {
         if (-not $arcIds -or $arcIds.Count -lt 2) { throw 'arcNodeResourceIds must list both node resource IDs.' }
         $script:arcIds = $arcIds
 
-        $templateParameterNames = @($pv.PSObject.Properties.Name)
+        $templateJson = Get-Content $script:TemplateFile -Raw | ConvertFrom-Json
+        $templateParameterNames = @($templateJson.parameters.PSObject.Properties.Name)
+        Write-Info "ARM template parameters loaded: $($templateParameterNames.Count)"
         $hasGatewayIdParameter = $templateParameterNames -contains 'arcGatewayId'
         $hasUseGatewayParameter = $templateParameterNames -contains 'useArcGateway'
         if ($script:UseArcGateway -and ($hasGatewayIdParameter -xor $hasUseGatewayParameter)) {
@@ -239,7 +241,7 @@ try {
                     -ResourceGroupName $script:ResourceGroupName `
                     -TemplateFile $script:TemplateFile `
                     -TemplateParameterFile $script:ParameterFile `
-                    @ov `
+                    -TemplateParameterObject $script:ov `
                     -ErrorAction Stop 4>$null
             if ($r) {
                 Write-Warn "Validation reported issues:"
@@ -260,7 +262,7 @@ try {
                 -ResourceGroupName $script:ResourceGroupName `
                 -TemplateFile $script:TemplateFile `
                 -TemplateParameterFile $script:ParameterFile `
-                @ov `
+                -TemplateParameterObject $script:ov `
                 -ErrorAction Stop
         $wi | Out-Host
     }
@@ -275,7 +277,7 @@ try {
                 -Name $script:DeploymentName `
                 -TemplateFile $script:TemplateFile `
                 -TemplateParameterFile $script:ParameterFile `
-                @ov `
+                -TemplateParameterObject $script:ov `
                 -ErrorAction Stop
         Write-Ok "Deployment submitted: $($dep.DeploymentName) - provisioning state: $($dep.ProvisioningState)"
         Write-Info 'Azure Local cloud deployment runs for 1-3 hours. Track it in the portal (Azure Local instance) or with Get-AzResourceGroupDeployment.'
