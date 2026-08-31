@@ -252,7 +252,7 @@ try {
                 foreach ($item in $Value) {
                     $items += ,(ConvertTo-ArmParameterValue $item)
                 }
-                return $items
+                return ,$items
             }
             return $Value
         }
