@@ -286,7 +286,6 @@ try {
     }
 
     Invoke-Step 'Create or reuse Arc Gateway' {
-        $script:ArcGatewayID = $null
         if (-not $script:UseArcGateway) {
             Write-Info 'Arc Gateway disabled.'
             return
@@ -294,37 +293,53 @@ try {
 
         $gatewayType = 'Microsoft.HybridCompute/gateways'
         $statePath = Join-Path $PSScriptRoot 'config\arc-gateway.local.json'
-        $canonicalGatewayId = if ($script:ArcGatewayName) {
-            "/subscriptions/$SubscriptionId/resourceGroups/$ResourceGroupName/providers/$gatewayType/$($script:ArcGatewayName)"
+        $gatewayName = [string]$script:ArcGatewayName
+        $canonicalGatewayId = if ($gatewayName) {
+            "/subscriptions/$SubscriptionId/resourceGroups/$ResourceGroupName/providers/$gatewayType/$gatewayName"
         } else { $null }
+
         $state = $null
         if (Test-Path $statePath -PathType Leaf) {
-            try { $state = Get-Content $statePath -Raw | ConvertFrom-Json } catch { Write-Warn "Ignoring unreadable Arc Gateway state: $statePath" }
+            try { $state = Get-Content $statePath -Raw | ConvertFrom-Json }
+            catch { Write-Warn "Ignoring unreadable Arc Gateway state: $statePath" }
         }
 
-        $candidateId = $script:ArcGatewayID
-        $stateIdProperty = if ($state) { $state.PSObject.Properties['resourceId'] } else { $null }
-        if (-not $candidateId -and $stateIdProperty) { $candidateId = [string]$stateIdProperty.Value }
+        # Resolve an explicit ID or persisted ID first. The exact ARM resource-ID
+        # lookup is intentional: it prevents a second create operation when the
+        # gateway is already visible but the name query is eventually consistent.
+        $candidateId = [string]$ArcGatewayID
+        if (-not $candidateId -and $state) {
+            $stateId = $state.PSObject.Properties['resourceId']
+            if ($stateId) { $candidateId = [string]$stateId.Value }
+        }
+
         $gateway = $null
         $gatewayId = $null
-
         if ($candidateId) {
-            $gateway = Get-AzResource -ResourceId $candidateId -ErrorAction SilentlyContinue
+            $gateway = Get-AzResource -ResourceId $candidateId -ExpandProperties -ErrorAction SilentlyContinue
             if ($gateway) {
-                $typeProperty = $gateway.PSObject.Properties['ResourceType']
-                $resourceType = if ($typeProperty) { [string]$typeProperty.Value } else { $gatewayType }
-                if ($resourceType -ne $gatewayType) { throw "Resource is not an Arc Gateway: $candidateId" }
-                $gatewayId = [string]$candidateId
+                $gatewayId = $candidateId
                 if ($gatewayId -notmatch "^/subscriptions/$([regex]::Escape($SubscriptionId))/") {
                     throw 'Arc Gateway must be in the Azure Local deployment subscription.'
                 }
-                Write-Ok "Reusing Arc Gateway from ID: $gatewayId"
-            } else { Write-Warn "Configured/state Arc Gateway was not found: $candidateId" }
+                Write-Ok "Reusing Arc Gateway by resource ID: $gatewayId"
+            } else {
+                Write-Warn "Configured/state Arc Gateway was not found: $candidateId"
+            }
         }
 
-        if (-not $gateway -and $script:ArcGatewayName) {
+        # Mandatory exact lookup by the configured name before New-AzArcGateway.
+        if (-not $gateway -and $canonicalGatewayId) {
+            $gateway = Get-AzResource -ResourceId $canonicalGatewayId -ExpandProperties -ErrorAction SilentlyContinue
+            if ($gateway) {
+                $gatewayId = $canonicalGatewayId
+                Write-Ok "Reusing Arc Gateway by exact resource ID: $gatewayId"
+            }
+        }
+
+        if (-not $gateway -and $gatewayName) {
             $gateway = Get-AzResource -ResourceGroupName $ResourceGroupName `
-                -ResourceType $gatewayType -Name $script:ArcGatewayName `
+                -ResourceType $gatewayType -Name $gatewayName -ExpandProperties `
                 -ErrorAction SilentlyContinue
             if ($gateway) {
                 $gatewayId = $canonicalGatewayId
@@ -336,101 +351,101 @@ try {
             Write-Warn 'No Arc Gateway found. Validate mode is read-only; Register mode will create it.'
             return
         }
-        if (-not $gateway -and -not $script:ArcGatewayName) {
+        if (-not $gateway -and -not $gatewayName) {
             throw 'UseArcGateway is enabled but ArcGatewayName is empty and no valid ArcGatewayID/state was found.'
         }
 
         if (-not $gateway) {
-            if (-not (Get-Command New-AzArcgateway -ErrorAction SilentlyContinue)) {
+            if (-not (Get-Command New-AzArcGateway -ErrorAction SilentlyContinue)) {
                 try {
                     Install-Module Az.ArcGateway -Force -AllowClobber -Scope CurrentUser -ErrorAction Stop
                     Import-Module Az.ArcGateway -ErrorAction Stop
-                } catch { throw "Az.ArcGateway/New-AzArcgateway is required to auto-create the gateway: $($_.Exception.Message)" }
-            }
-            if (-not (Get-Command New-AzArcgateway -ErrorAction SilentlyContinue)) {
-                throw 'New-AzArcgateway is unavailable after installing Az.ArcGateway.'
+                } catch {
+                    throw "Az.ArcGateway/New-AzArcGateway is required to auto-create the gateway: $($_.Exception.Message)"
+                }
             }
 
-            Write-Info "Creating Arc Gateway $($script:ArcGatewayName) (Azure may take 10 minutes or longer)..."
-            $creationReportedError = $false
+            $gatewayCommand = Get-Command New-AzArcGateway -ErrorAction Stop
+            $gatewayParameters = @($gatewayCommand.Parameters.Keys)
+            $createArgs = @{
+                Name              = $gatewayName
+                ResourceGroupName = $ResourceGroupName
+                Location          = $Region
+                GatewayType       = 'Public'
+                ErrorAction       = 'Stop'
+            }
+            if ($gatewayParameters -contains 'Subscription') {
+                $createArgs['Subscription'] = $SubscriptionId
+            } elseif ($gatewayParameters -contains 'SubscriptionId') {
+                $createArgs['SubscriptionId'] = $SubscriptionId
+            } else {
+                throw 'New-AzArcGateway exposes neither Subscription nor SubscriptionId.'
+            }
+            if ($gatewayParameters -contains 'AllowedFeatures') {
+                $createArgs['AllowedFeatures'] = '*'
+                Write-Info 'Using cmdlet AllowedFeatures=*.'
+            } else {
+                Write-Warn 'Installed New-AzArcGateway has no AllowedFeatures parameter; using module default.'
+            }
+
+            Write-Info "Creating Arc Gateway $gatewayName (Azure may take 10 minutes or longer)..."
             try {
-                # Az.ArcGateway versions differ: some expose Subscription, others
-                # SubscriptionId, and AllowedFeatures is optional in the installed module.
-                $gatewayCommand = Get-Command New-AzArcgateway -ErrorAction Stop
-                $gatewayParameters = @($gatewayCommand.Parameters.Keys)
-                $createArgs = @{
-                    Name              = $script:ArcGatewayName
-                    ResourceGroupName = $ResourceGroupName
-                    Location          = $Region
-                    GatewayType       = 'Public'
-                    ErrorAction       = 'Stop'
-                }
-                if ($gatewayParameters -contains 'Subscription') {
-                    $createArgs['Subscription'] = $SubscriptionId
-                } elseif ($gatewayParameters -contains 'SubscriptionId') {
-                    $createArgs['SubscriptionId'] = $SubscriptionId
-                } else {
-                    throw 'New-AzArcGateway exposes neither Subscription nor SubscriptionId.'
-                }
-                if ($gatewayParameters -contains 'AllowedFeatures') {
-                    $createArgs['AllowedFeatures'] = '*'
-                    Write-Info 'Using cmdlet AllowedFeatures=*.'
-                } else {
-                    Write-Warn 'Installed New-AzArcGateway has no AllowedFeatures parameter; using module default.'
-                }
-                $null = New-AzArcgateway @createArgs
+                # Do not use the returned object for identity; the cmdlet can return
+                # an operation response without ResourceId/Id.
+                $null = New-AzArcGateway @createArgs
             } catch {
-                # A service-side timeout can still leave the resource created. Re-query before failing.
-                $creationReportedError = $true
-                $gateway = Get-AzResource -ResourceGroupName $ResourceGroupName `
-                    -ResourceType $gatewayType -Name $script:ArcGatewayName `
-                    -ErrorAction SilentlyContinue
-                if (-not $gateway) { throw "Arc Gateway creation failed and no resource was found: $($_.Exception.Message)" }
-                Write-Warn "Arc Gateway creation reported an error, but the resource exists; waiting for its final state."
-            }
-
-            # New-AzArcGateway may return a response object without ResourceId/Id.
-            # The ARM resource ID is deterministic from the validated scope and name.
-            $gatewayId = $canonicalGatewayId
-            if (-not $gatewayId) { throw 'Arc Gateway was created/found but no canonical resource ID could be formed.' }
-
-            $deadline = (Get-Date).AddMinutes($script:ArcGatewayTimeoutMin)
-            do {
-                $current = Get-AzResource -ResourceGroupName $ResourceGroupName `
-                    -ResourceType $gatewayType -Name $script:ArcGatewayName `
-                    -ExpandProperties -ErrorAction SilentlyContinue
-                if ($current) {
-                    $gateway = $current
-                    $stateProperty = $current.PSObject.Properties['ProvisioningState']
-                    $stateNow = if ($stateProperty) { [string]$stateProperty.Value } else { $null }
-                    $propertiesProperty = $current.PSObject.Properties['Properties']
-                    $properties = if ($propertiesProperty) { $propertiesProperty.Value } else { $null }
-                    if (-not $stateNow -and $properties) {
-                        $nestedStateProperty = $properties.PSObject.Properties['provisioningState']
-                        if ($nestedStateProperty) { $stateNow = [string]$nestedStateProperty.Value }
-                    }
-                    if ($stateNow -eq 'Succeeded') { break }
-                    if ($stateNow -in @('Failed','Canceled','Cancelled')) { throw "Arc Gateway provisioning failed with state '$stateNow'." }
+                # The service may have completed creation even if the client timed out.
+                $gateway = Get-AzResource -ResourceId $canonicalGatewayId -ExpandProperties -ErrorAction SilentlyContinue
+                if (-not $gateway) {
+                    throw "Arc Gateway creation failed and no resource was found: $($_.Exception.Message)"
                 }
-                if ((Get-Date) -ge $deadline) { throw "Timed out waiting for Arc Gateway provisioning after $($script:ArcGatewayTimeoutMin) minutes." }
-                Start-Sleep -Seconds 20
-            } while ($true)
-            Write-Ok "Arc Gateway ready: $gatewayId"
+                Write-Warn 'Gateway creation reported an error, but the resource exists; continuing with its final state.'
+            }
+            $gatewayId = $canonicalGatewayId
         }
 
         if (-not $gatewayId) { $gatewayId = $canonicalGatewayId }
-        if (-not $gatewayId) { throw 'Arc Gateway was found but no resource ID was returned.' }
+        if (-not $gatewayId) { throw 'Arc Gateway was found/created but no canonical resource ID could be formed.' }
+
+        # Confirm provisioning state before touching any Arc machine.
+        $deadline = (Get-Date).AddMinutes($script:ArcGatewayTimeoutMin)
+        do {
+            $current = Get-AzResource -ResourceId $gatewayId -ExpandProperties -ErrorAction SilentlyContinue
+            if ($current) {
+                $gateway = $current
+                $stateNow = $null
+                $stateProperty = $current.PSObject.Properties['ProvisioningState']
+                if ($stateProperty) { $stateNow = [string]$stateProperty.Value }
+                if (-not $stateNow) {
+                    $propertiesProperty = $current.PSObject.Properties['Properties']
+                    if ($propertiesProperty -and $propertiesProperty.Value) {
+                        $nestedState = $propertiesProperty.Value.PSObject.Properties['provisioningState']
+                        if ($nestedState) { $stateNow = [string]$nestedState.Value }
+                    }
+                }
+                if ($stateNow -eq 'Succeeded') { break }
+                if ($stateNow -in @('Failed','Canceled','Cancelled')) {
+                    throw "Arc Gateway provisioning failed with state '$stateNow'."
+                }
+            }
+            if ((Get-Date) -ge $deadline) {
+                throw "Timed out waiting for Arc Gateway provisioning after $($script:ArcGatewayTimeoutMin) minutes."
+            }
+            Start-Sleep -Seconds 20
+        } while ($true)
+
         $script:ArcGatewayID = $gatewayId
         $stateDir = Split-Path $statePath -Parent
         if (-not (Test-Path $stateDir)) { New-Item -ItemType Directory -Path $stateDir -Force | Out-Null }
         [ordered]@{
-            resourceId = $script:ArcGatewayID
-            name = $script:ArcGatewayName
-            resourceGroup = $ResourceGroupName
+            resourceId     = $script:ArcGatewayID
+            name           = $gatewayName
+            resourceGroup  = $ResourceGroupName
             subscriptionId = $SubscriptionId
-            location = $Region
-            updatedUtc = [DateTime]::UtcNow.ToString('o')
+            location       = $Region
+            updatedUtc     = [DateTime]::UtcNow.ToString('o')
         } | ConvertTo-Json | Set-Content -Path $statePath -Encoding UTF8
+        Write-Ok "Arc Gateway ready: $gatewayId"
         Write-Ok "Persisted Arc Gateway ID to $statePath"
     }
 
@@ -491,7 +506,15 @@ try {
             if ($script:registerMode -and $script:ArcGatewayID -and $r.AlreadyConnected) {
                 Import-Module Az.ConnectedMachine -ErrorAction SilentlyContinue
                 if (-not (Get-Command Update-AzArcSetting -ErrorAction SilentlyContinue)) {
-                    throw 'Update-AzArcSetting is required to attach the Arc Gateway to an existing Arc machine.'
+                    try {
+                        Install-Module Az.ConnectedMachine -Force -AllowClobber -Scope CurrentUser -ErrorAction Stop
+                        Import-Module Az.ConnectedMachine -ErrorAction Stop
+                    } catch {
+                        throw "Az.ConnectedMachine/Update-AzArcSetting is required to attach the Arc Gateway to an existing Arc machine: $($_.Exception.Message)"
+                    }
+                }
+                if (-not (Get-Command Update-AzArcSetting -ErrorAction SilentlyContinue)) {
+                    throw 'Update-AzArcSetting is unavailable after installing Az.ConnectedMachine.'
                 }
                 $machineName = if ($nodeNameByIp.ContainsKey($ip)) { $nodeNameByIp[$ip] } else { $ip }
                 Update-AzArcSetting -ResourceGroupName $script:ResourceGroupName `
@@ -542,10 +565,18 @@ try {
             $name = if ($nodeNameByIp.ContainsKey($ip)) { $nodeNameByIp[$ip] } else { $ip }
             try {
                 $m = Get-AzConnectedMachine -ResourceGroupName $ResourceGroupName -Name $name -ErrorAction Stop
-                Write-Ok "$name : $($m.Status) - $($m.Id)"
+                if ($m.Status -ne 'Connected') {
+                    $script:arcFailures += "$name : Azure Arc status is $($m.Status), expected Connected"
+                    Write-Err "$name : Azure Arc status is $($m.Status), expected Connected"
+                } else {
+                    Write-Ok "$name : $($m.Status) - $($m.Id)"
+                }
             } catch {
                 Write-Warn "$name not yet visible in Azure ($ResourceGroupName). It may still be onboarding/rebooting - re-check with Get-AzConnectedMachine."
             }
+        }
+        if ($script:arcFailures.Count -gt 0) {
+            throw "Arc verification failed: $($script:arcFailures -join ' | ')"
         }
         Write-Info 'Collect the resource ids above into arcNodeResourceIds for the Stage 5 ARM parameters.'
     }
