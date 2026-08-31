@@ -99,6 +99,7 @@ if (-not $b.ContainsKey('NodeIPs')) {
 $winrmPort = if ($Transport -eq 'HTTPS') { 5986 } else { 5985 }
 $dispatcher = Join-Path $PSScriptRoot 'bootstrap-cluster.ps1'
 if (-not (Test-Path $dispatcher)) { throw "Dispatcher not found: $dispatcher" }
+$arcGatewayStateFile = Join-Path $PSScriptRoot 'config\arc-gateway.local.json'
 
 $stageName = @{
     1 = '01-deploy-os'; 2 = '02-configure-network'; 3 = '03-prepare-node'
@@ -138,11 +139,26 @@ function Invoke-Stage {
     if ($LASTEXITCODE -and $LASTEXITCODE -ne 0) { throw "$Name exited with code $LASTEXITCODE" }
 }
 
-# --- shared node auth forwarded to stages 2/3/4 ---
+function Get-PersistedArcGatewayId {
+    if ($script:ArcGatewayID) { return [string]$script:ArcGatewayID }
+    if (Test-Path $script:arcGatewayStateFile -PathType Leaf) {
+        try {
+            $state = Get-Content $script:arcGatewayStateFile -Raw -ErrorAction Stop | ConvertFrom-Json
+            if ($state.resourceId) { return [string]$state.resourceId }
+        } catch {
+            Write-Warn "Could not read Arc Gateway state file: $($_.Exception.Message)"
+        }
+    }
+    return $null
+}
+
+# --- shared node auth forwarded to stages 2/3/4/5 ---
 $nodeAuth = @{ ConfigureTrustedHosts = $true; Transport = $Transport; LocalAdminUser = $LocalAdminUser }
 if ($LocalAdminPassword) {
     $nodeAuth['LocalAdminPassword'] = $LocalAdminPassword
 } else {
+    # Stage 0 and the node stages run under this same Windows identity. The helper
+    # returns a PSCredential; only the SecureString password is forwarded.
     $nodeCredential = Get-LabNodeCredential -User $LocalAdminUser
     $nodeAuth['LocalAdminPassword'] = $nodeCredential.Password
 }
@@ -236,7 +252,15 @@ try {
                     if (-not $script:TemplateFile -or -not $script:ParameterFile) {
                         throw 'Stage 5 needs -TemplateFile and -ParameterFile.'
                     }
-                    $ex = $script:nodeAuth + $script:spAuth + @{ Region = $script:Region; TemplateFile = $script:TemplateFile; ParameterFile = $script:ParameterFile }
+                    $gatewayIdForStage5 = Get-PersistedArcGatewayId
+                    $ex = $script:nodeAuth + $script:spAuth + @{
+                        Region = $script:Region
+                        TemplateFile = $script:TemplateFile
+                        ParameterFile = $script:ParameterFile
+                        UseArcGateway = $script:UseArcGateway
+                        ArcGatewayName = $script:ArcGatewayName
+                    }
+                    if ($gatewayIdForStage5) { $ex['ArcGatewayID'] = $gatewayIdForStage5 }
                     if ($script:DryRun) {
                         $ex['DeploymentMode'] = 'Validate'
                     } else {
