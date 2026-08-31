@@ -145,8 +145,11 @@ try {
         }
 
         # Parse the parameter file and check adapter names / arcNodeResourceIds.
-        $pf = Get-Content $script:ParameterFile -Raw | ConvertFrom-Json
-        $pv = $pf.parameters
+        # Persist the parsed parameter document for later Invoke-Step blocks.
+        # Invoke-Step may execute its scriptblock in a child/local scope; using
+        # script scope prevents StrictMode from reporting $pf as undefined.
+        $script:parameterFileObject = Get-Content $script:ParameterFile -Raw | ConvertFrom-Json
+        $pv = $script:parameterFileObject.parameters
 
         # Adapter-name sanity vs config (the mismatch that would fail deployment).
         $cfgMgmt = if ($cfg.ContainsKey('MgmtAdapters')) { @($cfg.MgmtAdapters) } else { @() }
@@ -255,7 +258,7 @@ try {
         }
 
         $script:templateParameterObject = @{}
-        foreach ($property in $pf.parameters.PSObject.Properties) {
+        foreach ($property in $script:parameterFileObject.parameters.PSObject.Properties) {
             $entry = $property.Value
             if ($entry -and ($entry.PSObject.Properties.Name -contains 'value')) {
                 $script:templateParameterObject[$property.Name] =
