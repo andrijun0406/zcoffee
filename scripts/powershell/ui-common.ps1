@@ -469,7 +469,9 @@ function Get-LabNodeCredential {
 
     if (Test-Path $secFile) {
         try {
-            $sec = Get-Content $secFile -Raw | ConvertTo-SecureString -ErrorAction Stop
+            # Set-Content writes a line terminator; trim it before DPAPI deserialization.
+        $blob = (Get-Content $secFile -Raw -ErrorAction Stop).Trim()
+        $sec = ConvertTo-SecureString -String $blob -ErrorAction Stop
             if (Get-Command Write-Info -ErrorAction SilentlyContinue) {
                 Write-Info "Using stored node credential for '$authUser' (DPAPI; value never logged)."
             }
