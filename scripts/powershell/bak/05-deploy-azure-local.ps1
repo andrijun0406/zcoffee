@@ -40,9 +40,6 @@ param(
     [Parameter(Mandatory)][string]$ParameterFile,
     [string]$DeploymentName,
     [string]$Region,
-    [switch]$UseArcGateway,
-    [string]$ArcGatewayID,
-    [string]$ArcGatewayName,
     [switch]$UseExistingAzLogin,
     # Unattended service-principal / managed-identity auth (zero-touch).
     [string]$ServicePrincipalId,
@@ -74,9 +71,6 @@ $Region            = Resolve-Setting -Name 'Region'            -Bound $b -Curren
 if (-not $Region) { $Region = 'southeastasia' }
 $LocalAdminUser    = Resolve-Setting -Name 'LocalAdminUser'    -Bound $b -Current $LocalAdminUser    -ConfigKey 'LocalAdminUser' -Config $cfg
 if (-not $LocalAdminUser) { $LocalAdminUser = 'Administrator' }
-$UseArcGateway     = [bool](Resolve-Setting -Name 'UseArcGateway' -Bound $b -Current ([bool]$UseArcGateway) -ConfigKey 'UseArcGateway' -Config $cfg)
-$ArcGatewayName    = Resolve-Setting -Name 'ArcGatewayName' -Bound $b -Current $ArcGatewayName -ConfigKey 'ArcGatewayName' -Config $cfg
-$ArcGatewayID      = Resolve-Setting -Name 'ArcGatewayID' -Bound $b -Current $ArcGatewayID -ConfigKey 'ArcGatewayID' -Config $cfg
 
 if (-not $SubscriptionId) { throw 'SubscriptionId is required. Pass -SubscriptionId (from your private runbook).' }
 
@@ -127,23 +121,6 @@ try {
         if (-not $rg) { throw "Resource group '$script:ResourceGroupName' not found. Stage 4 (Arc) creates it; run Stage 4 Register first." }
         Write-Ok "Resource group present: $script:ResourceGroupName ($($rg.Location))"
 
-        if ($script:UseArcGateway) {
-            $statePath = Join-Path $PSScriptRoot 'config\arc-gateway.local.json'
-            if (-not $script:ArcGatewayID -and (Test-Path $statePath -PathType Leaf)) {
-                try { $script:ArcGatewayID = [string]((Get-Content $statePath -Raw | ConvertFrom-Json).resourceId) } catch { }
-            }
-            if (-not $script:ArcGatewayID) {
-                throw 'UseArcGateway is enabled but no Arc Gateway ID is available. Run Stage 4 Register first.'
-            }
-            $gw = Get-AzResource -ResourceId $script:ArcGatewayID -ErrorAction Stop
-            if ($gw.ResourceType -ne 'Microsoft.HybridCompute/gateways') { throw 'Configured ArcGatewayID is not a Microsoft.HybridCompute/gateways resource.' }
-            if ($gw.ResourceId -notmatch "^/subscriptions/$([regex]::Escape($script:SubscriptionId))/") {
-                throw 'Arc Gateway must be in the Azure Local deployment subscription.'
-            }
-            $script:ArcGatewayID = $gw.ResourceId
-            Write-Ok "Arc Gateway validated: $script:ArcGatewayID"
-        }
-
         # Parse the parameter file and check adapter names / arcNodeResourceIds.
         $pf = Get-Content $script:ParameterFile -Raw | ConvertFrom-Json
         $pv = $pf.parameters
@@ -173,22 +150,6 @@ try {
         $arcIds = @($pv.arcNodeResourceIds.value)
         if (-not $arcIds -or $arcIds.Count -lt 2) { throw 'arcNodeResourceIds must list both node resource IDs.' }
         $script:arcIds = $arcIds
-
-        $templateParameterNames = @($pv.PSObject.Properties.Name)
-        $hasGatewayIdParameter = $templateParameterNames -contains 'arcGatewayId'
-        $hasUseGatewayParameter = $templateParameterNames -contains 'useArcGateway'
-        if ($script:UseArcGateway -and ($hasGatewayIdParameter -xor $hasUseGatewayParameter)) {
-            throw 'ARM template must declare both arcGatewayId and useArcGateway, or neither.'
-        }
-        if ($script:UseArcGateway -and $hasGatewayIdParameter) {
-            $script:gatewayTemplateOverrides = @{ arcGatewayId = $script:ArcGatewayID; useArcGateway = $true }
-            Write-Ok 'ARM template exposes Arc Gateway parameters; runtime overrides will be supplied.'
-        } elseif ($script:UseArcGateway) {
-            $script:gatewayTemplateOverrides = @{}
-            Write-Info 'ARM template has no Arc Gateway parameters; using Stage 4 Arc machine association.'
-        } else {
-            $script:gatewayTemplateOverrides = @{}
-        }
 
         if ($script:SkipArcCheck) {
             Write-Warn 'Skipping Arc-Connected gate (-SkipArcCheck).'
@@ -223,9 +184,6 @@ try {
         $script:overrides = @{
             localAdminUserName = $script:LocalAdminUser
             localAdminPassword = $script:LocalAdminPassword
-        }
-        if ($script:gatewayTemplateOverrides -and $script:gatewayTemplateOverrides.Count -gt 0) {
-            foreach ($k in $script:gatewayTemplateOverrides.Keys) { $script:overrides[$k] = $script:gatewayTemplateOverrides[$k] }
         }
         $script:ov = $script:overrides
         Write-Ok "Local admin '$script:LocalAdminUser' credential prepared for injection (never logged)."

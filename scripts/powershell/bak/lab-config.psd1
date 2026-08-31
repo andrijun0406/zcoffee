@@ -13,11 +13,6 @@
     ClusterName    = 'azljkt01clu'
     ResourceGroup  = 'azljkt01rg'
     DeploymentName = 'azljkt01dep'
-
-    # Azure Arc Gateway (created/reused automatically by Stage 4 Register)
-    UseArcGateway  = $true
-    ArcGatewayName = 'zcoffee-arcgw'
-    ArcGatewayID   = ''
     CustomLocation = 'azljkt01loc'
     KeyVault       = 'azljkt01kv'
     DiagStorage    = 'azljkt01diag'

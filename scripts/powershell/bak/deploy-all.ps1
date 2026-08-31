@@ -164,7 +164,7 @@ try {
         $script:spAuth = @{ ServicePrincipalId = $rec.appId; TenantId = $rec.tenantId; SubscriptionId = $script:SubscriptionId }
 
         if ($rec.authType -eq 'certificate') {
-            $script:spAuth['CertificateThumbprint'] = $rec.certThumbprint
+            $script:spAuth['SpCertThumbprint'] = $rec.certThumbprint
             Write-Ok "SP (certificate) AppId $($rec.appId), thumbprint $($rec.certThumbprint)"
         }
         elseif ($rec.PSObject.Properties.Name -contains 'secretProtected' -and $rec.secretProtected) {
@@ -205,7 +205,7 @@ try {
                     if ($mode -eq 'Register' -and -not (Confirm-Gate 'Stage 4 - Arc REGISTER (onboards + reboots both nodes)')) {
                         throw 'Stage 4 Register declined by operator.'
                     }
-                    $ex = $script:nodeAuth + $script:spAuth + @{ Mode = $mode; Region = $script:Region }
+                    $ex = $script:nodeAuth + $script:spAuth + @{ ArcMode = $mode; Region = $script:Region }
                     if ($mode -eq 'Register') { $ex['Apply'] = $true }
                     Invoke-Stage -Name $name -Extra $ex
                     if ($mode -eq 'Register') {

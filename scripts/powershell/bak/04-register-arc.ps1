@@ -56,12 +56,6 @@ param(
     # Explicit AccountID (object id of the signed-in identity). Recommended for CERT service
     # principals where directory-read to resolve the SP object id may be unavailable.
     [string]$AccountId,
-
-    # Arc Gateway. In Register mode, an enabled gateway is created/reused idempotently.
-    [switch]$UseArcGateway,
-    [string]$ArcGatewayID,
-    [string]$ArcGatewayName,
-    [int]$ArcGatewayTimeoutMin = 120,
     [switch]$UseGui
 )
 
@@ -80,9 +74,6 @@ $Region            = Resolve-Setting -Name 'Region' -Bound $b -Current $Region -
 if (-not $Region) { $Region = 'southeastasia' }
 $LocalAdminUser    = Resolve-Setting -Name 'LocalAdminUser' -Bound $b -Current $LocalAdminUser -ConfigKey 'LocalAdminUser' -Config $cfg
 if (-not $LocalAdminUser) { $LocalAdminUser = 'Administrator' }
-$UseArcGateway     = [bool](Resolve-Setting -Name 'UseArcGateway' -Bound $b -Current ([bool]$UseArcGateway) -ConfigKey 'UseArcGateway' -Config $cfg)
-$ArcGatewayName    = Resolve-Setting -Name 'ArcGatewayName' -Bound $b -Current $ArcGatewayName -ConfigKey 'ArcGatewayName' -Config $cfg
-$ArcGatewayID      = Resolve-Setting -Name 'ArcGatewayID' -Bound $b -Current $ArcGatewayID -ConfigKey 'ArcGatewayID' -Config $cfg
 
 if (-not $b.ContainsKey('NodeIPs')) {
     if ($cfg.ContainsKey('Nodes')) { $NodeIPs = @($cfg.Nodes | ForEach-Object { $_.HostIP }) }
@@ -112,25 +103,22 @@ $requiredProviders = @(
 $registerMode = ($Mode -eq 'Register')
 if ($registerMode -and -not $Apply) { throw 'Register mode requires -Apply (safety gate).' }
 
-$totalSteps = 6 + ($NodeIPs.Count)
+$totalSteps = 5 + ($NodeIPs.Count)
 Initialize-Ui -StageName '04-register-arc' -TotalSteps $totalSteps -UseGui:$UseGui
 
 # Node-side Arc initialization (runs ON each node via WinRM).
 $remoteArc = {
-    param($subId, $rg, $tenant, $region, $cloud, $armToken, $accountId, $doRegister, $spAppId, $spSecret, $arcGatewayId)
+    param($subId, $rg, $tenant, $region, $cloud, $armToken, $accountId, $doRegister, $spAppId, $spSecret)
 
-    $o = [ordered]@{ Actions=@(); Warnings=@(); Errors=@(); AlreadyConnected=$false; ModulesOk=$false; Registered=$false; GatewayId=$arcGatewayId }
+    $o = [ordered]@{ Actions=@(); Warnings=@(); Errors=@(); AlreadyConnected=$false; ModulesOk=$false; Registered=$false }
     $agentExe = "$env:ProgramFiles\AzureConnectedMachineAgent\azcmagent.exe"
 
     try {
         if (Test-Path $agentExe) {
-            $agentJson = (& $agentExe show -j 2>$null | Out-String) | ConvertFrom-Json
-            if ($agentJson.status -eq 'Connected') {
-                $o.AlreadyConnected = $true
-                $o.Actions += 'azcmagent status is Connected'
-            }
+            $agent = & $agentExe show 2>$null
+            if ($agent -match 'Connected') { $o.AlreadyConnected = $true; $o.Actions += 'azcmagent already Connected' }
         }
-    } catch { $o.Warnings += 'Unable to read azcmagent JSON status.' }
+    } catch { }
 
     try {
         foreach ($m in @('Az.Accounts','Az.Resources','AzsHci.ARCInstaller')) {
@@ -159,11 +147,6 @@ $remoteArc = {
                 TenantID       = $tenant
                 Region         = $region
                 Cloud          = $cloud
-            }
-            if ($arcGatewayId) {
-                if ($valid -notcontains 'ArcGatewayID') { throw 'Installed AzsHci.ARCInstaller does not support ArcGatewayID.' }
-                $arc['ArcGatewayID'] = $arcGatewayId
-                $o.Actions += "Arc Gateway ID supplied: $arcGatewayId"
             }
             if ($spAppId -and $spSecret -and ($valid -contains 'SpnCredential')) {
                 $spSec = ConvertTo-SecureString $spSecret -AsPlainText -Force
@@ -285,125 +268,6 @@ try {
         Write-Ok 'ARM token + account id acquired (not logged).'
     }
 
-    Invoke-Step 'Create or reuse Arc Gateway' {
-        $script:ArcGatewayID = $null
-        if (-not $script:UseArcGateway) {
-            Write-Info 'Arc Gateway disabled.'
-            return
-        }
-
-        $statePath = Join-Path $PSScriptRoot 'config\arc-gateway.local.json'
-        $state = $null
-        if (Test-Path $statePath -PathType Leaf) {
-            try { $state = Get-Content $statePath -Raw | ConvertFrom-Json } catch { Write-Warn "Ignoring unreadable Arc Gateway state: $statePath" }
-        }
-
-        $candidateId = $script:ArcGatewayID
-        if (-not $candidateId -and $state -and $state.resourceId) { $candidateId = [string]$state.resourceId }
-        $gateway = $null
-
-        if ($candidateId) {
-            $gateway = Get-AzResource -ResourceId $candidateId -ErrorAction SilentlyContinue
-            if ($gateway -and $gateway.ResourceType -ne 'Microsoft.HybridCompute/gateways') {
-                throw "Resource is not an Arc Gateway: $candidateId"
-            }
-            if ($gateway) {
-                if ($gateway.ResourceId -notmatch "^/subscriptions/$([regex]::Escape($SubscriptionId))/") {
-                    throw 'Arc Gateway must be in the Azure Local deployment subscription.'
-                }
-                Write-Ok "Reusing Arc Gateway from ID: $($gateway.ResourceId)"
-            } else { Write-Warn "Configured/state Arc Gateway was not found: $candidateId" }
-        }
-
-        if (-not $gateway -and $script:ArcGatewayName) {
-            $gateway = Get-AzResource -ResourceGroupName $ResourceGroupName `
-                -ResourceType 'Microsoft.HybridCompute/gateways' -Name $script:ArcGatewayName `
-                -ErrorAction SilentlyContinue
-            if ($gateway) { Write-Ok "Reusing Arc Gateway by name: $($gateway.ResourceId)" }
-        }
-
-        if (-not $gateway -and -not $script:registerMode) {
-            Write-Warn 'No Arc Gateway found. Validate mode is read-only; Register mode will create it.'
-            return
-        }
-        if (-not $gateway -and -not $script:ArcGatewayName) {
-            throw 'UseArcGateway is enabled but ArcGatewayName is empty and no valid ArcGatewayID/state was found.'
-        }
-
-        if (-not $gateway) {
-            if (-not (Get-Command New-AzArcgateway -ErrorAction SilentlyContinue)) {
-                try {
-                    Install-Module Az.ArcGateway -Force -AllowClobber -Scope CurrentUser -ErrorAction Stop
-                    Import-Module Az.ArcGateway -ErrorAction Stop
-                } catch { throw "Az.ArcGateway/New-AzArcgateway is required to auto-create the gateway: $($_.Exception.Message)" }
-            }
-            if (-not (Get-Command New-AzArcgateway -ErrorAction SilentlyContinue)) {
-                throw 'New-AzArcgateway is unavailable after installing Az.ArcGateway.'
-            }
-
-            Write-Info "Creating Arc Gateway $($script:ArcGatewayName) (Azure may take 10 minutes or longer)..."
-            $creationReportedError = $false
-            try {
-                $gateway = New-AzArcgateway -Name $script:ArcGatewayName `
-                    -ResourceGroupName $ResourceGroupName -Location $Region `
-                    -Subscription $SubscriptionId -GatewayType public `
-                    -AllowedFeatures '*' -ErrorAction Stop
-            } catch {
-                # A service-side timeout can still leave the resource created. Re-query before failing.
-                $creationReportedError = $true
-                $gateway = Get-AzResource -ResourceGroupName $ResourceGroupName `
-                    -ResourceType 'Microsoft.HybridCompute/gateways' -Name $script:ArcGatewayName `
-                    -ErrorAction SilentlyContinue
-                if (-not $gateway) { throw "Arc Gateway creation failed and no resource was found: $($_.Exception.Message)" }
-                Write-Warn "Arc Gateway creation reported an error, but the resource exists; waiting for its final state."
-            }
-            $gatewayId = if ($gateway.ResourceId) { [string]$gateway.ResourceId } elseif ($gateway.Id) { [string]$gateway.Id } else { $null }
-            if (-not $gatewayId) {
-                $gateway = Get-AzResource -ResourceGroupName $ResourceGroupName `
-                    -ResourceType 'Microsoft.HybridCompute/gateways' -Name $script:ArcGatewayName `
-                    -ErrorAction Stop
-                $gatewayId = [string]$gateway.ResourceId
-            }
-            if (-not $gatewayId) { throw 'Arc Gateway was created/found but no resource ID was returned.' }
-
-            $initialState = [string]$gateway.ProvisioningState
-            if (-not $initialState -and $gateway.Properties) { $initialState = [string]$gateway.Properties.provisioningState }
-            if ($creationReportedError -or ($initialState -and $initialState -notin @('Succeeded','成功'))) {
-                $deadline = (Get-Date).AddMinutes($script:ArcGatewayTimeoutMin)
-                do {
-                    $current = Get-AzResource -ResourceGroupName $ResourceGroupName `
-                        -ResourceType 'Microsoft.HybridCompute/gateways' -Name $script:ArcGatewayName `
-                        -ExpandProperties -ErrorAction SilentlyContinue
-                    if ($current) {
-                        $gateway = $current
-                        $stateNow = [string]$current.ProvisioningState
-                        if (-not $stateNow -and $current.Properties) { $stateNow = [string]$current.Properties.provisioningState }
-                        if ($stateNow -eq 'Succeeded') { break }
-                        if ($stateNow -in @('Failed','Canceled','Cancelled')) { throw "Arc Gateway provisioning failed with state '$stateNow'." }
-                    }
-                    if ((Get-Date) -ge $deadline) { throw "Timed out waiting for Arc Gateway provisioning after $($script:ArcGatewayTimeoutMin) minutes." }
-                    Start-Sleep -Seconds 20
-                } while ($true)
-            }
-            Write-Ok "Arc Gateway ready: $gatewayId"
-        }
-
-        $gatewayId = if ($gateway.ResourceId) { [string]$gateway.ResourceId } elseif ($gateway.Id) { [string]$gateway.Id } else { $null }
-        if (-not $gatewayId) { throw 'Arc Gateway was found but no resource ID was returned.' }
-        $script:ArcGatewayID = $gatewayId
-        $stateDir = Split-Path $statePath -Parent
-        if (-not (Test-Path $stateDir)) { New-Item -ItemType Directory -Path $stateDir -Force | Out-Null }
-        [ordered]@{
-            resourceId = $script:ArcGatewayID
-            name = if ($gateway.Name) { $gateway.Name } else { $script:ArcGatewayName }
-            resourceGroup = $ResourceGroupName
-            subscriptionId = $SubscriptionId
-            location = $Region
-            updatedUtc = [DateTime]::UtcNow.ToString('o')
-        } | ConvertTo-Json | Set-Content -Path $statePath -Encoding UTF8
-        Write-Ok "Persisted Arc Gateway ID to $statePath"
-    }
-
     Invoke-Step 'Resolve node credentials and WinRM connectivity' {
         if ($b.ContainsKey('LocalAdminPassword') -and $null -ne $script:LocalAdminPassword) {
             $script:cred = [System.Management.Automation.PSCredential]::new($script:authUser, $script:LocalAdminPassword)
@@ -453,23 +317,10 @@ try {
             $r = Invoke-Command @connArgs -ScriptBlock $remoteArc -ArgumentList @(
                 $script:SubscriptionId, $script:ResourceGroupName, $script:TenantId, $script:Region, $script:Cloud,
                 $script:armToken, $script:accountId, [bool]$script:registerMode,
-                $script:spAppIdForNode, $script:spSecretForNode, $script:ArcGatewayID)
+                $script:spAppIdForNode, $script:spSecretForNode)
 
             $r = @($r) | Where-Object { $_ -is [pscustomobject] -and $_.PSObject.Properties.Name -contains 'Actions' } | Select-Object -Last 1
             if (-not $r) { throw "No Arc result object returned from $ip (scriptblock output was unexpected)." }
-
-            if ($script:registerMode -and $script:ArcGatewayID -and $r.AlreadyConnected) {
-                Import-Module Az.ConnectedMachine -ErrorAction SilentlyContinue
-                if (-not (Get-Command Update-AzArcSetting -ErrorAction SilentlyContinue)) {
-                    throw 'Update-AzArcSetting is required to attach the Arc Gateway to an existing Arc machine.'
-                }
-                $machineName = if ($nodeNameByIp.ContainsKey($ip)) { $nodeNameByIp[$ip] } else { $ip }
-                Update-AzArcSetting -ResourceGroupName $script:ResourceGroupName `
-                    -SubscriptionId $script:SubscriptionId -BaseProvider Microsoft.HybridCompute `
-                    -BaseResourceType machine -BaseResourceName $machineName `
-                    -GatewayResourceId $script:ArcGatewayID -ErrorAction Stop | Out-Null
-                Write-Ok "$ip existing Arc machine associated with gateway"
-            }
 
             foreach ($a in $r.Actions)  { Write-Ok  $a }
             foreach ($w in $r.Warnings) { Write-Warn $w }
@@ -479,7 +330,7 @@ try {
                 if ($r.ModulesOk) { Write-Ok "$ip prerequisites OK (modules present)" }
                 else { Write-Warn "$ip missing Arc modules (Register mode installs them)" }
             } else {
-                if ($r.AlreadyConnected) { Write-Ok "$ip already Arc-connected (gateway association checked/updated)" }
+                if ($r.AlreadyConnected) { Write-Ok "$ip already Arc-connected (skipped)" }
                 elseif ($r.Registered)   { Write-Ok "$ip Arc initialization succeeded" }
                 elseif ($r.Errors.Count -eq 0) { Write-Warn "$ip did not register and reported no error (investigate)" }
             }
