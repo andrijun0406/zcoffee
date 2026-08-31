@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
     Zero-touch orchestrator for the zcoffee Azure Local build. Chains Stage 0 -> 6 with one
     up-front credential, inter-stage reboot synchronization, safety gates, and unattended
@@ -83,6 +83,26 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'ui-common.ps1')
 
+
+function Show-ZcoffeeBanner {
+    $banner = @(
+        ''
+        ' ( ('
+        ' ) ) Z C O F F E E'
+        ' ........ -------------------------------------------'
+        ' | |] Zero-touCh Orchestration For Fabric & Edge'
+        ' \ / From Bare Metal to Azure Local'
+        ' `----'' Brewing clusters, zero touch.'
+        ''
+    )
+
+    foreach ($line in $banner) {
+        Write-Host $line -ForegroundColor Cyan
+    }
+}
+
+Show-ZcoffeeBanner
+
 $cfg = Import-LabConfig
 $b   = $PSBoundParameters
 
@@ -132,11 +152,22 @@ function Confirm-Gate {
 
 function Invoke-Stage {
     param([string]$Name, [hashtable]$Extra)
-    $stageArgs = @{ Stage = $Name }
-    foreach ($k in $Extra.Keys) { $stageArgs[$k] = $Extra[$k] }
-    Write-Info "--> dispatching $Name"
+
+    # Bootstrap accepts canonical stage IDs only. Normalize display labels such
+    # as "Stage 04-register-arc" before binding its ValidateSet parameter.
+    $displayName = if ($null -eq $Name) { '' } else { [string]$Name }
+    $canonicalName = [regex]::Replace($displayName, '^Stage\s+', '')
+    if (-not ($stageName.Values -contains $canonicalName)) {
+        throw "Invalid stage name '$Name'. Expected one of: $($stageName.Values -join ', ')"
+    }
+
+    $stageArgs = @{ Stage = $canonicalName }
+    if ($null -ne $Extra) {
+        foreach ($k in $Extra.Keys) { $stageArgs[$k] = $Extra[$k] }
+    }
+    Write-Info "--> dispatching $canonicalName"
     & $dispatcher @stageArgs
-    if ($LASTEXITCODE -and $LASTEXITCODE -ne 0) { throw "$Name exited with code $LASTEXITCODE" }
+    if ($LASTEXITCODE -and $LASTEXITCODE -ne 0) { throw "$canonicalName exited with code $LASTEXITCODE" }
 }
 
 function Get-PersistedArcGatewayId {
