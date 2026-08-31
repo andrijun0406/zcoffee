@@ -13,11 +13,6 @@
     ClusterName    = 'azljkt01clu'
     ResourceGroup  = 'azljkt01rg'
     DeploymentName = 'azljkt01dep'
-
-    # Azure Arc Gateway (created/reused automatically by Stage 4 Register)
-    UseArcGateway  = $true
-    ArcGatewayName = 'zcoffee-arcgw'
-    ArcGatewayID   = ''
     CustomLocation = 'azljkt01loc'
     KeyVault       = 'azljkt01kv'
     DiagStorage    = 'azljkt01diag'
@@ -50,6 +45,11 @@
     # Azure scope (fill from private runbook / ODIN report; leave blank in Git)
     SubscriptionId = ''
     TenantId       = ''
+
+    # Azure Arc Gateway (non-secret; local state persists the resolved resource ID)
+    UseArcGateway  = $true
+    ArcGatewayName = 'zcoffee-arcgw'
+    ArcGatewayID   = ''
 
     # Nodes (HostIP from ODIN report; iDRAC = out-of-band mgmt, not in ODIN report)
     Nodes = @(

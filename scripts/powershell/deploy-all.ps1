@@ -32,6 +32,10 @@ param(
     [string]$SubscriptionId,
     [string]$TenantId,
     [string]$Region = 'southeastasia',
+    [switch]$UseArcGateway,
+    [string]$ArcGatewayID,
+    [string]$ArcGatewayName,
+    [int]$ArcGatewayTimeoutMin = 120,
 
     # Which stages to run (numbers). Default is the full node->cluster path. Stage 0 (SP) runs
     # automatically only if credentials are missing; it is not part of this list.
@@ -85,6 +89,9 @@ $b   = $PSBoundParameters
 # --- Resolve settings from the single source of truth (parameters override) ---
 if (-not $SubscriptionId -and $cfg.ContainsKey('SubscriptionId')) { $SubscriptionId = $cfg.SubscriptionId }
 if (-not $TenantId       -and $cfg.ContainsKey('TenantId'))       { $TenantId       = $cfg.TenantId }
+if (-not $b.ContainsKey('UseArcGateway') -and $cfg.ContainsKey('UseArcGateway')) { $UseArcGateway = [bool]$cfg.UseArcGateway }
+if (-not $ArcGatewayID -and $cfg.ContainsKey('ArcGatewayID')) { $ArcGatewayID = [string]$cfg.ArcGatewayID }
+if (-not $ArcGatewayName -and $cfg.ContainsKey('ArcGatewayName')) { $ArcGatewayName = [string]$cfg.ArcGatewayName }
 if (-not $b.ContainsKey('NodeIPs')) {
     if ($cfg.ContainsKey('Nodes')) { $NodeIPs = @($cfg.Nodes | ForEach-Object { $_.HostIP }) }
     else { $NodeIPs = @('10.8.230.232','10.8.230.235') }
@@ -133,7 +140,12 @@ function Invoke-Stage {
 
 # --- shared node auth forwarded to stages 2/3/4 ---
 $nodeAuth = @{ ConfigureTrustedHosts = $true; Transport = $Transport; LocalAdminUser = $LocalAdminUser }
-if ($LocalAdminPassword) { $nodeAuth['LocalAdminPassword'] = $LocalAdminPassword }
+if ($LocalAdminPassword) {
+    $nodeAuth['LocalAdminPassword'] = $LocalAdminPassword
+} else {
+    $nodeCredential = Get-LabNodeCredential -User $LocalAdminUser
+    $nodeAuth['LocalAdminPassword'] = $nodeCredential.Password
+}
 
 Initialize-Ui -StageName 'deploy-all (orchestrator)' -TotalSteps (2 + $Stages.Count) -UseGui:$UseGui
 
@@ -205,7 +217,14 @@ try {
                     if ($mode -eq 'Register' -and -not (Confirm-Gate 'Stage 4 - Arc REGISTER (onboards + reboots both nodes)')) {
                         throw 'Stage 4 Register declined by operator.'
                     }
-                    $ex = $script:nodeAuth + $script:spAuth + @{ Mode = $mode; Region = $script:Region }
+                    $ex = $script:nodeAuth + $script:spAuth + @{
+                        ArcMode = $mode
+                        Region = $script:Region
+                        UseArcGateway = $script:UseArcGateway
+                        ArcGatewayID = $script:ArcGatewayID
+                        ArcGatewayName = $script:ArcGatewayName
+                        ArcGatewayTimeoutMin = $script:ArcGatewayTimeoutMin
+                    }
                     if ($mode -eq 'Register') { $ex['Apply'] = $true }
                     Invoke-Stage -Name $name -Extra $ex
                     if ($mode -eq 'Register') {
@@ -217,7 +236,7 @@ try {
                     if (-not $script:TemplateFile -or -not $script:ParameterFile) {
                         throw 'Stage 5 needs -TemplateFile and -ParameterFile.'
                     }
-                    $ex = $script:spAuth + @{ Region = $script:Region; TemplateFile = $script:TemplateFile; ParameterFile = $script:ParameterFile }
+                    $ex = $script:nodeAuth + $script:spAuth + @{ Region = $script:Region; TemplateFile = $script:TemplateFile; ParameterFile = $script:ParameterFile }
                     if ($script:DryRun) {
                         $ex['DeploymentMode'] = 'Validate'
                     } else {

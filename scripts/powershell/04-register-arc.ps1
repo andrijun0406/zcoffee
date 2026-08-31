@@ -344,10 +344,31 @@ try {
             Write-Info "Creating Arc Gateway $($script:ArcGatewayName) (Azure may take 10 minutes or longer)..."
             $creationReportedError = $false
             try {
-                $gateway = New-AzArcgateway -Name $script:ArcGatewayName `
-                    -ResourceGroupName $ResourceGroupName -Location $Region `
-                    -Subscription $SubscriptionId -GatewayType public `
-                    -AllowedFeatures '*' -ErrorAction Stop
+                # Az.ArcGateway versions differ: some expose Subscription, others
+                # SubscriptionId, and AllowedFeatures is optional in the installed module.
+                $gatewayCommand = Get-Command New-AzArcgateway -ErrorAction Stop
+                $gatewayParameters = @($gatewayCommand.Parameters.Keys)
+                $createArgs = @{
+                    Name              = $script:ArcGatewayName
+                    ResourceGroupName = $ResourceGroupName
+                    Location          = $Region
+                    GatewayType       = 'Public'
+                    ErrorAction       = 'Stop'
+                }
+                if ($gatewayParameters -contains 'Subscription') {
+                    $createArgs['Subscription'] = $SubscriptionId
+                } elseif ($gatewayParameters -contains 'SubscriptionId') {
+                    $createArgs['SubscriptionId'] = $SubscriptionId
+                } else {
+                    throw 'New-AzArcGateway exposes neither Subscription nor SubscriptionId.'
+                }
+                if ($gatewayParameters -contains 'AllowedFeatures') {
+                    $createArgs['AllowedFeatures'] = '*'
+                    Write-Info 'Using cmdlet AllowedFeatures=*.'
+                } else {
+                    Write-Warn 'Installed New-AzArcGateway has no AllowedFeatures parameter; using module default.'
+                }
+                $gateway = New-AzArcgateway @createArgs
             } catch {
                 # A service-side timeout can still leave the resource created. Re-query before failing.
                 $creationReportedError = $true
@@ -469,6 +490,21 @@ try {
                     -BaseResourceType machine -BaseResourceName $machineName `
                     -GatewayResourceId $script:ArcGatewayID -ErrorAction Stop | Out-Null
                 Write-Ok "$ip existing Arc machine associated with gateway"
+
+                # Existing agents older than 1.51 need the local connection mode
+                # explicitly set. This is idempotent on newer agent versions too.
+                $gatewayMode = Invoke-Command @connArgs -ScriptBlock {
+                    $agentPath = "$env:ProgramFiles\AzureConnectedMachineAgent\azcmagent.exe"
+                    if (-not (Test-Path $agentPath)) { throw 'azcmagent.exe not found on node.' }
+                    & $agentPath config set connection.type gateway 2>&1 | Out-Null
+                    if ($LASTEXITCODE -ne 0) { throw "azcmagent config set connection.type gateway failed (exit $LASTEXITCODE)." }
+                    $mode = (& $agentPath config get connection.type 2>$null | Out-String).Trim()
+                    [pscustomobject]@{ Mode = $mode }
+                }
+                if (-not $gatewayMode -or $gatewayMode.Mode -notmatch '(?i)gateway') {
+                    throw "$ip did not report connection.type=gateway after association."
+                }
+                Write-Ok "$ip local Arc agent is using gateway mode"
             }
 
             foreach ($a in $r.Actions)  { Write-Ok  $a }
