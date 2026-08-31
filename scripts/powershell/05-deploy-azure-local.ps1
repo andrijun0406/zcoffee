@@ -85,7 +85,7 @@ if ($DeploymentMode -eq 'Deploy' -and -not $EnableDeployment) {
     throw 'Deploy mode is disabled by default. Re-run with -DeploymentMode Deploy -EnableDeployment after review.'
 }
 
-$totalSteps = 4
+$totalSteps = 5
 if ($DeploymentMode -eq 'Deploy') { $totalSteps = 6 }
 Initialize-Ui -StageName '05-deploy-azure-local' -TotalSteps $totalSteps -UseGui:$UseGui
 
@@ -221,15 +221,55 @@ try {
         if (-not $b.ContainsKey('LocalAdminPassword') -or $null -eq $script:LocalAdminPassword) {
             $script:LocalAdminPassword = Read-Host -Prompt "Enter the local admin password for '$script:LocalAdminUser' (exists on both nodes)" -AsSecureString
         }
-        # Override parameters injected at runtime (take precedence over the parameter file).
-        $script:overrides = @{
-            localAdminUserName = $script:LocalAdminUser
-            localAdminPassword = $script:LocalAdminPassword
+        # Build one TemplateParameterObject from the JSON file, then apply
+        # runtime overrides. ARM cmdlets do not allow TemplateParameterFile
+        # and TemplateParameterObject in the same parameter set.
+        function ConvertTo-ArmParameterValue {
+            param([AllowNull()][object]$Value)
+
+            if ($null -eq $Value) { return $null }
+            if ($Value -is [System.Collections.IDictionary]) {
+                $h = @{}
+                foreach ($key in $Value.Keys) {
+                    $h[$key] = ConvertTo-ArmParameterValue $Value[$key]
+                }
+                return $h
+            }
+            if ($Value -is [pscustomobject]) {
+                $h = @{}
+                foreach ($prop in $Value.PSObject.Properties) {
+                    $h[$prop.Name] = ConvertTo-ArmParameterValue $prop.Value
+                }
+                return $h
+            }
+            if (($Value -is [System.Collections.IEnumerable]) -and
+                -not ($Value -is [string]) -and
+                -not ($Value -is [System.Security.SecureString])) {
+                $items = @()
+                foreach ($item in $Value) {
+                    $items += ,(ConvertTo-ArmParameterValue $item)
+                }
+                return $items
+            }
+            return $Value
         }
+
+        $script:templateParameterObject = @{}
+        foreach ($property in $pf.parameters.PSObject.Properties) {
+            $entry = $property.Value
+            if ($entry -and ($entry.PSObject.Properties.Name -contains 'value')) {
+                $script:templateParameterObject[$property.Name] =
+                    ConvertTo-ArmParameterValue $entry.value
+            }
+        }
+        $script:templateParameterObject['localAdminUserName'] = $script:LocalAdminUser
+        $script:templateParameterObject['localAdminPassword'] = $script:LocalAdminPassword
+
         if ($script:gatewayTemplateOverrides -and $script:gatewayTemplateOverrides.Count -gt 0) {
-            foreach ($k in $script:gatewayTemplateOverrides.Keys) { $script:overrides[$k] = $script:gatewayTemplateOverrides[$k] }
+            foreach ($k in $script:gatewayTemplateOverrides.Keys) {
+                $script:templateParameterObject[$k] = $script:gatewayTemplateOverrides[$k]
+            }
         }
-        $script:ov = $script:overrides
         Write-Ok "Local admin '$script:LocalAdminUser' credential prepared for injection (never logged)."
         Write-Info 'If the template also requires a separate deployment/LCM credential, add it here.'
     }
@@ -240,8 +280,7 @@ try {
             $r = Test-AzResourceGroupDeployment `
                     -ResourceGroupName $script:ResourceGroupName `
                     -TemplateFile $script:TemplateFile `
-                    -TemplateParameterFile $script:ParameterFile `
-                    -TemplateParameterObject $script:ov `
+                    -TemplateParameterObject $script:templateParameterObject `
                     -ErrorAction Stop 4>$null
             if ($r) {
                 Write-Warn "Validation reported issues:"
@@ -261,8 +300,7 @@ try {
         $wi = Get-AzResourceGroupDeploymentWhatIfResult `
                 -ResourceGroupName $script:ResourceGroupName `
                 -TemplateFile $script:TemplateFile `
-                -TemplateParameterFile $script:ParameterFile `
-                -TemplateParameterObject $script:ov `
+                -TemplateParameterObject $script:templateParameterObject `
                 -ErrorAction Stop
         $wi | Out-Host
     }
@@ -276,8 +314,7 @@ try {
                 -ResourceGroupName $script:ResourceGroupName `
                 -Name $script:DeploymentName `
                 -TemplateFile $script:TemplateFile `
-                -TemplateParameterFile $script:ParameterFile `
-                -TemplateParameterObject $script:ov `
+                -TemplateParameterObject $script:templateParameterObject `
                 -ErrorAction Stop
         Write-Ok "Deployment submitted: $($dep.DeploymentName) - provisioning state: $($dep.ProvisioningState)"
         Write-Info 'Azure Local cloud deployment runs for 1-3 hours. Track it in the portal (Azure Local instance) or with Get-AzResourceGroupDeployment.'
