@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
     Stage 4 - Register both nodes with Azure Arc (Arc-enabled servers) for Azure Local deployment.
 
@@ -62,6 +62,7 @@ param(
     [string]$ArcGatewayID,
     [string]$ArcGatewayName,
     [int]$ArcGatewayTimeoutMin = 120,
+    [string]$TargetSolutionVersion,
     [switch]$UseGui
 )
 
@@ -83,6 +84,7 @@ if (-not $LocalAdminUser) { $LocalAdminUser = 'Administrator' }
 $UseArcGateway     = [bool](Resolve-Setting -Name 'UseArcGateway' -Bound $b -Current ([bool]$UseArcGateway) -ConfigKey 'UseArcGateway' -Config $cfg)
 $ArcGatewayName    = Resolve-Setting -Name 'ArcGatewayName' -Bound $b -Current $ArcGatewayName -ConfigKey 'ArcGatewayName' -Config $cfg
 $ArcGatewayID      = Resolve-Setting -Name 'ArcGatewayID' -Bound $b -Current $ArcGatewayID -ConfigKey 'ArcGatewayID' -Config $cfg
+$TargetSolutionVersion = Resolve-Setting -Name 'TargetSolutionVersion' -Bound $b -Current $TargetSolutionVersion -ConfigKey 'TargetSolutionVersion' -Config $cfg
 
 if (-not $b.ContainsKey('NodeIPs')) {
     if ($cfg.ContainsKey('Nodes')) { $NodeIPs = @($cfg.Nodes | ForEach-Object { $_.HostIP }) }
@@ -117,17 +119,34 @@ Initialize-Ui -StageName '04-register-arc' -TotalSteps $totalSteps -UseGui:$UseG
 
 # Node-side Arc initialization (runs ON each node via WinRM).
 $remoteArc = {
-    param($subId, $rg, $tenant, $region, $cloud, $armToken, $accountId, $doRegister, $spAppId, $spSecret, $arcGatewayId)
+    param($subId, $rg, $tenant, $region, $cloud, $armToken, $accountId, $doRegister, $spAppId, $spSecret, $arcGatewayId, $targetSolutionVersion)
 
-    $o = [ordered]@{ Actions=@(); Warnings=@(); Errors=@(); AlreadyConnected=$false; ModulesOk=$false; Registered=$false; GatewayId=$arcGatewayId }
+    $o = [ordered]@{
+        Actions=@(); Warnings=@(); Errors=@(); AlreadyConnected=$false; ModulesOk=$false; Registered=$false
+        GatewayId=$arcGatewayId; ArcStatus=$null; GatewayMode=$null; PartnerConfigured=$false
+        PartnerSolutionVersion=$null; ReadyForAzureLocal=$false
+    }
     $agentExe = "$env:ProgramFiles\AzureConnectedMachineAgent\azcmagent.exe"
 
     try {
         if (Test-Path $agentExe) {
             $agentJson = (& $agentExe show -j 2>$null | Out-String) | ConvertFrom-Json
-            if ($agentJson.status -eq 'Connected') {
+            $o.ArcStatus = [string]$agentJson.status
+            if ($o.ArcStatus -eq 'Connected') {
                 $o.AlreadyConnected = $true
                 $o.Actions += 'azcmagent status is Connected'
+            }
+            $modeText = (& $agentExe config get connection.type 2>&1 | Out-String).Trim()
+            $o.GatewayMode = $modeText
+            if ($modeText) { $o.Actions += "Arc connection.type: $modeText" }
+
+            $partnerText = (& $agentExe partnerconfig get SolutionVersion --partner AzureLocal 2>&1 | Out-String).Trim()
+            if ($partnerText -match '(?m)^\s*\d+\.\d+\.\d+\s*$') {
+                $o.PartnerConfigured = $true
+                $o.PartnerSolutionVersion = (($partnerText -split '\r?\n' | Where-Object { $_ -match '^\s*\d+\.\d+\.\d+\s*$' } | Select-Object -First 1).Trim())
+                $o.Actions += "AzureLocal partner SolutionVersion: $($o.PartnerSolutionVersion)"
+            } else {
+                $o.Warnings += 'AzureLocal partner metadata is missing or unavailable.'
             }
         }
     } catch { $o.Warnings += 'Unable to read azcmagent JSON status.' }
@@ -165,6 +184,11 @@ $remoteArc = {
                 $arc['ArcGatewayID'] = $arcGatewayId
                 $o.Actions += "Arc Gateway ID supplied: $arcGatewayId"
             }
+            if ($targetSolutionVersion) {
+                if ($valid -notcontains 'TargetSolutionVersion') { throw 'Installed AzsHci.ARCInstaller does not support TargetSolutionVersion.' }
+                $arc['TargetSolutionVersion'] = $targetSolutionVersion
+                $o.Actions += "Target solution version supplied: $targetSolutionVersion"
+            }
             if ($spAppId -and $spSecret -and ($valid -contains 'SpnCredential')) {
                 $spSec = ConvertTo-SecureString $spSecret -AsPlainText -Force
                 $arc['SpnCredential'] = [System.Management.Automation.PSCredential]::new($spAppId, $spSec)
@@ -180,6 +204,22 @@ $remoteArc = {
             $null = Invoke-AzStackHciArcInitialization @arc -ErrorAction Stop *>&1
             $o.Registered = $true
             $o.Actions += 'Invoke-AzStackHciArcInitialization completed'
+
+            # Refresh all readiness signals after initialization. A pre-registration
+            # probe is expected to show no AzureLocal partner; the post-init probe is
+            # the authoritative result used by the Stage 5 gate.
+            try {
+                $agentJson = (& $agentExe show -j 2>$null | Out-String) | ConvertFrom-Json
+                $o.ArcStatus = [string]$agentJson.status
+                $o.GatewayMode = (& $agentExe config get connection.type 2>&1 | Out-String).Trim()
+                $partnerText = (& $agentExe partnerconfig get SolutionVersion --partner AzureLocal 2>&1 | Out-String).Trim()
+                if ($partnerText -match '(?m)^\s*\d+\.\d+\.\d+\s*$') {
+                    $o.PartnerConfigured = $true
+                    $o.PartnerSolutionVersion = (($partnerText -split '\r?\n' | Where-Object { $_ -match '^\s*\d+\.\d+\.\d+\s*$' } | Select-Object -First 1).Trim())
+                } else {
+                    $o.Warnings = @($o.Warnings | Where-Object { $_ -ne 'AzureLocal partner metadata is missing or unavailable.' })
+                }
+            } catch { $o.Errors += "Post-registration readiness probe failed: $($_.Exception.Message)" }
         } catch {
             $o.Errors += "Arc init FAILED: $($_.Exception.Message)"
         }
@@ -483,35 +523,32 @@ try {
             $r = Invoke-Command @connArgs -ScriptBlock $remoteArc -ArgumentList @(
                 $script:SubscriptionId, $script:ResourceGroupName, $script:TenantId, $script:Region, $script:Cloud,
                 $script:armToken, $script:accountId, [bool]$script:registerMode,
-                $script:spAppIdForNode, $script:spSecretForNode, $script:ArcGatewayID)
+                $script:spAppIdForNode, $script:spSecretForNode, $script:ArcGatewayID, $script:TargetSolutionVersion)
 
             $r = @($r) | Where-Object { $_ -is [pscustomobject] -and $_.PSObject.Properties.Name -contains 'Actions' } | Select-Object -Last 1
             if (-not $r) { throw "No Arc result object returned from $ip (scriptblock output was unexpected)." }
 
+            $partnerMatches = $true
+            if ($script:TargetSolutionVersion) {
+                $partnerMatches = $r.PartnerConfigured -and ($r.PartnerSolutionVersion -eq $script:TargetSolutionVersion)
+            }
+            $gatewayMatches = $true
+            if ($script:UseArcGateway) {
+                $gatewayMatches = ($r.GatewayMode -match '(?i)^gateway$')
+            }
+            $r.ReadyForAzureLocal = ($r.ArcStatus -eq 'Connected') -and $gatewayMatches -and $partnerMatches
+
             if ($script:registerMode -and $script:ArcGatewayID -and $r.AlreadyConnected) {
-                # Update-AzArcSetting in some Az.ArcGateway builds constructs the
-                # invalid Microsoft.HybridCompute/machine path. Use the documented
-                # Hybrid Compute settings REST endpoint instead.
+                # Use the Hybrid Compute settings REST endpoint. Some Az.ArcGateway
+                # versions generate an invalid singular machine resource path.
                 $machineName = if ($nodeNameByIp.ContainsKey($ip)) { $nodeNameByIp[$ip] } else { $ip }
                 $escapedMachineName = [System.Uri]::EscapeDataString([string]$machineName)
                 $associationPath = "/subscriptions/$($script:SubscriptionId)/resourceGroups/$($script:ResourceGroupName)/providers/Microsoft.HybridCompute/machines/$escapedMachineName/providers/Microsoft.HybridCompute/settings/default?api-version=2024-07-31-preview"
-                $associationPayload = @{
-                    properties = @{
-                        gatewayProperties = @{
-                            gatewayResourceId = $script:ArcGatewayID
-                        }
-                    }
-                } | ConvertTo-Json -Depth 6 -Compress
-
-                $associationResponse = Invoke-AzRestMethod -Method PUT -Path $associationPath `
-                    -Payload $associationPayload -ErrorAction Stop
+                $associationPayload = @{ properties = @{ gatewayProperties = @{ gatewayResourceId = $script:ArcGatewayID } } } | ConvertTo-Json -Depth 6 -Compress
+                $associationResponse = Invoke-AzRestMethod -Method PUT -Path $associationPath -Payload $associationPayload -ErrorAction Stop
                 $associationStatus = 0
-                if ($associationResponse.PSObject.Properties.Name -contains 'StatusCode') {
-                    $associationStatus = [int]$associationResponse.StatusCode
-                }
-                if ($associationStatus -and ($associationStatus -lt 200 -or $associationStatus -ge 300)) {
-                    throw "$ip Arc Gateway association returned HTTP $associationStatus."
-                }
+                if ($associationResponse.PSObject.Properties.Name -contains 'StatusCode') { $associationStatus = [int]$associationResponse.StatusCode }
+                if ($associationStatus -and ($associationStatus -lt 200 -or $associationStatus -ge 300)) { throw "$ip Arc Gateway association returned HTTP $associationStatus." }
                 Write-Ok "$ip existing Arc machine associated with gateway via REST"
 
                 # Existing agents older than 1.51 need the local connection mode
@@ -528,6 +565,9 @@ try {
                     throw "$ip did not report connection.type=gateway after association."
                 }
                 Write-Ok "$ip local Arc agent is using gateway mode"
+                $r.GatewayMode = $gatewayMode.Mode
+                $r.ReadyForAzureLocal = ($r.ArcStatus -eq 'Connected') -and
+                    ($r.GatewayMode -match '(?i)^gateway$') -and $partnerMatches
             }
 
             foreach ($a in $r.Actions)  { Write-Ok  $a }
@@ -537,10 +577,17 @@ try {
             if (-not $script:registerMode) {
                 if ($r.ModulesOk) { Write-Ok "$ip prerequisites OK (modules present)" }
                 else { Write-Warn "$ip missing Arc modules (Register mode installs them)" }
+                if ($script:TargetSolutionVersion -and -not $r.ReadyForAzureLocal) {
+                    Write-Warn "$ip is not Azure Local ready: ArcStatus=$($r.ArcStatus); GatewayMode=$($r.GatewayMode); Partner=$($r.PartnerSolutionVersion)"
+                }
             } else {
                 if ($r.AlreadyConnected) { Write-Ok "$ip already Arc-connected (gateway association checked/updated)" }
                 elseif ($r.Registered)   { Write-Ok "$ip Arc initialization succeeded" }
                 elseif ($r.Errors.Count -eq 0) { Write-Warn "$ip did not register and reported no error (investigate)" }
+                if (-not $r.ReadyForAzureLocal) {
+                    $script:arcFailures += "$ip : composite Azure Local readiness failed (ArcStatus=$($r.ArcStatus); GatewayMode=$($r.GatewayMode); Partner=$($r.PartnerSolutionVersion); expected TargetSolutionVersion=$script:TargetSolutionVersion)"
+                    Write-Err "$ip is not Azure Local ready; do not proceed to Stage 5."
+                } else { Write-Ok "$ip Azure Local Arc prerequisites verified" }
             }
         }
     }
@@ -572,7 +619,7 @@ try {
         Write-Info 'Collect the resource ids above into arcNodeResourceIds for the Stage 5 ARM parameters.'
     }
 
-    Write-Info 'Arc registration prerequisite for Stage 5: both nodes must show Status=Connected before cloud deployment.'
+    Write-Info 'Arc registration prerequisite for Stage 5: every node must be Connected, use gateway mode when enabled, and expose the expected AzureLocal partner SolutionVersion.'
     Complete-Ui -FinalMessage "Arc stage finished ($Mode)."
 }
 catch {

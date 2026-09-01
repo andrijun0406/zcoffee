@@ -36,6 +36,7 @@ param(
     [string]$ArcGatewayID,
     [string]$ArcGatewayName,
     [int]$ArcGatewayTimeoutMin = 120,
+    [string]$TargetSolutionVersion,
 
     # Which stages to run (numbers). Default is the full node->cluster path. Stage 0 (SP) runs
     # automatically only if credentials are missing; it is not part of this list.
@@ -112,6 +113,7 @@ if (-not $TenantId       -and $cfg.ContainsKey('TenantId'))       { $TenantId   
 if (-not $b.ContainsKey('UseArcGateway') -and $cfg.ContainsKey('UseArcGateway')) { $UseArcGateway = [bool]$cfg.UseArcGateway }
 if (-not $ArcGatewayID -and $cfg.ContainsKey('ArcGatewayID')) { $ArcGatewayID = [string]$cfg.ArcGatewayID }
 if (-not $ArcGatewayName -and $cfg.ContainsKey('ArcGatewayName')) { $ArcGatewayName = [string]$cfg.ArcGatewayName }
+if (-not $TargetSolutionVersion -and $cfg.ContainsKey('TargetSolutionVersion')) { $TargetSolutionVersion = [string]$cfg.TargetSolutionVersion }
 if (-not $b.ContainsKey('NodeIPs')) {
     if ($cfg.ContainsKey('Nodes')) { $NodeIPs = @($cfg.Nodes | ForEach-Object { $_.HostIP }) }
     else { $NodeIPs = @('10.8.230.232','10.8.230.235') }
@@ -271,6 +273,7 @@ try {
                         ArcGatewayID = $script:ArcGatewayID
                         ArcGatewayName = $script:ArcGatewayName
                         ArcGatewayTimeoutMin = $script:ArcGatewayTimeoutMin
+                        TargetSolutionVersion = $script:TargetSolutionVersion
                     }
                     if ($mode -eq 'Register') { $ex['Apply'] = $true }
                     Invoke-Stage -Name $name -Extra $ex
@@ -290,6 +293,7 @@ try {
                         ParameterFile = $script:ParameterFile
                         UseArcGateway = $script:UseArcGateway
                         ArcGatewayName = $script:ArcGatewayName
+                        TargetSolutionVersion = $script:TargetSolutionVersion
                     }
                     if ($gatewayIdForStage5) { $ex['ArcGatewayID'] = $gatewayIdForStage5 }
                     if ($script:DryRun) {

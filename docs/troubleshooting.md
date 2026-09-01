@@ -27,6 +27,7 @@ Symptom -> cause -> fix, drawn from real Jakarta 01 deployment. For the full nar
 | WinRM `Access denied` as `LabAdmin` | Wrong account — answer file sets **Administrator** only | Use `.\Administrator`; ensure client `TrustedHosts` covers the nodes |
 | Stage 5 ARM can't find adapters | Adapter names in ARM don't match Windows | Use exact names incl. spaces: `Integrated NIC 1 Port 1-1`, `SLOT 2 Port 1/2` |
 | Az stage: `Az.Accounts not found` | Az PowerShell modules missing on the runner | `Install-Module Az.Accounts, Az.Resources -Scope CurrentUser` |
+| Stage 4/portal: node is Arc `Connected` but Not eligible; `Unknown partner: azurelocal` | Stage 4 skipped initialization because the node was already Connected; Azure Local partner metadata is absent | Preserve the gateway, run `repair-arc-node.ps1` for that node, then verify partner version + gateway mode + Connected status before Stage 5 |
 
 ## Recovering a wedged Remote File Share (RAC0718)
 ```powershell
@@ -65,3 +66,23 @@ Restart-Computer -Force
 - Keep credentials and firmware versions in the private runbook.
 - Recurring "my edit didn't persist" pain came from **two clones** (`C:\zcoffee` vs `C:\LabInfra`)
   and copy->commit->pull drift. Pick one canonical clone; verify with `Select-String` before running.
+
+
+## Connected but Azure Local partner metadata is missing
+
+Check the node locally:
+
+```powershell
+$e = "$env:ProgramFiles\AzureConnectedMachineAgent\azcmagent.exe"
+& $e partnerconfig get SolutionVersion --partner AzureLocal
+& $e config get connection.type
+((& $e show -j 2>$null | Out-String) | ConvertFrom-Json).status
+```
+
+`Unknown partner: azurelocal` means Arc onboarding completed without Azure Local partner registration. Do not fix this by changing the ARM template or deleting the resource group. Preserve the shared Arc Gateway, remove only the affected Arc machine and its extensions, disconnect the local agent with `azcmagent disconnect --force-local-only`, and run the targeted `repair-arc-node.ps1` helper.
+
+The permanent Stage 4 gate now passes `TargetSolutionVersion` to `Invoke-AzStackHciArcInitialization`, rechecks metadata after initialization, and refuses to report Register success unless the composite readiness contract is satisfied. Stage 5 repeats the composite check over WinRM.
+
+## Arc Gateway reuse
+
+`config/arc-gateway.local.json` is local state and must not be committed. If the gateway resource already exists, Stage 4 reuses it by exact resource ID/name and does not call `New-AzArcGateway` again.

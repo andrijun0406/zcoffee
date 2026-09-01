@@ -140,8 +140,8 @@ $spSecret = Read-Host 'SP secret' -AsSecureString
 ```
 Auth note: `-UseExistingAzLogin` alone reuses the interactive session; passing `-ServicePrincipalId`
 + `-ServicePrincipalSecret` (or `-ServicePrincipalCertThumbprint`) makes it fully unattended.
-Registers providers, ensures the RG, acquires tokens on the runner, then runs
-`Invoke-AzStackHciArcInitialization` per node over WinRM. Gate for Stage 5: both nodes `Connected`.
+Registers providers, ensures the RG, acquires tokens on the runner, creates or reuses the Arc Gateway when enabled, then runs
+`Invoke-AzStackHciArcInitialization` per node over WinRM with `-ArcGatewayID` and `-TargetSolutionVersion`. Gate for Stage 5: every node is `Connected`, uses gateway mode when enabled, and reports the configured Azure Local partner `SolutionVersion`.
 
 ---
 
@@ -161,7 +161,8 @@ Deploy needs `-DeploymentMode Deploy -EnableDeployment` and a typed `DEPLOY`.
   -TemplateFile ..\arm-templates\azuredeploy.json -ParameterFile ..\arm-templates\ODIN-parameters.json
 ```
 `localAdminUserName`/`localAdminPassword` are injected as runtime overrides (prompted); the param file
-keeps placeholders. Needs the Microsoft/Dell-provided `azuredeploy.json` template in `arm-templates/`.
+keeps placeholders. `TargetSolutionVersion` is resolved from `lab-config.psd1`; Stage 5 also verifies the
+Azure Local partner metadata over WinRM before ARM validation or deployment. Needs the Microsoft/Dell-provided `azuredeploy.json` template in `arm-templates/`.
 
 ---
 
@@ -177,3 +178,35 @@ Confirms cluster object, node membership/state, quorum (Cloud Witness), and S2D 
 - Apply SBE packages via LCM; manage with Dell OpenManage Integration for Windows Admin Center.
 - Delete `C:\Windows\Panther\unattend.xml` on each node (contains the obfuscated admin password).
 - Keep credentials, tenant/subscription IDs, and firmware versions in the private runbook.
+
+
+### Recovering a Connected node with missing Azure Local partner metadata
+
+Do not delete the resource group or the shared Arc Gateway. The targeted recovery removes only the affected Arc machine and its Azure Edge extensions, disconnects its local agent, and re-registers it with the existing gateway and target solution version.
+
+For the Jakarta 01 node 2 case:
+
+```powershell
+.\repair-arc-node.ps1 `
+  -NodeName 'azljkt01n2' `
+  -NodeIP '10.8.230.235' `
+  -ResourceGroupName 'azljkt01rg' `
+  -SubscriptionId $sub `
+  -TenantId $tenant `
+  -TargetSolutionVersion '12.2604.1003' `
+  -ArcGatewayID $gwId `
+  -UseExistingAzLogin
+```
+
+The helper requires an explicit `YES` confirmation unless `-AutoApprove` is supplied. After completion, verify:
+
+```powershell
+Invoke-Command 10.8.230.235 -Credential $cred -ScriptBlock {
+  $e = "$env:ProgramFiles\AzureConnectedMachineAgent\azcmagent.exe"
+  & $e partnerconfig get SolutionVersion --partner AzureLocal
+  & $e config get connection.type
+  ((& $e show -j 2>$null | Out-String) | ConvertFrom-Json).status
+}
+```
+
+Expected output is the configured solution version, `gateway`, and `Connected`. Run Stage 4 Validate and Stage 5 Validate again before any deployment submission.

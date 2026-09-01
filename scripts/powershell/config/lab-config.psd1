@@ -1,4 +1,4 @@
-@{
+﻿@{
     # ============================================================
     # Azure Local Lab - single source of truth (Jakarta 01)
     # Aligned with ODIN config report generated 2026-08-15.
@@ -50,6 +50,8 @@
     UseArcGateway  = $true
     ArcGatewayName = 'zcoffee-arcgw'
     ArcGatewayID   = ''
+    # Must match the Azure Local solution targeted by the deployment image/package.
+    TargetSolutionVersion = '12.2604.1003'
 
     # Nodes (HostIP from ODIN report; iDRAC = out-of-band mgmt, not in ODIN report)
     Nodes = @(

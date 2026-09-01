@@ -8,8 +8,8 @@
 | 1 Deploy OS | Confirmed hands-off (WMIC BOSS auto-select + MAC network bake on .232/.235) |
 | 2 Network validate | PASS - mgmt + storage 25GbE links up |
 | 3 Node readiness | PASS both nodes (Secure Boot on, SBE staged, egress 4/4, Env Checker green) |
-| 4 Arc register | Validate PASS; Register pending |
-| 5 Cloud deploy | Pending (needs azuredeploy.json + both nodes Arc-Connected) |
+| 4 Arc register | Gateway + partner metadata verified |
+| 5 Cloud deploy | Blocked by node OS/solution eligibility; ARM Validate passed |
 | 6 Validate cluster | Pending |
 
 Azure auth for Stages 4-5 supports a **service principal** (unattended). See the deployment guide's
@@ -98,3 +98,10 @@ zcoffee/
 - No credentials, tenant IDs, subscription IDs, or ISOs in the repo.
 - Real ARM parameters (`arm-templates/ODIN-parameters.json`) are gitignored.
 - The local Administrator password lives in the private runbook only.
+
+
+## Arc Gateway readiness
+
+Stage 4 creates or reuses the configured Arc Gateway and persists its resource ID in `config/arc-gateway.local.json`. Before Stage 5, every node must satisfy the composite gate: `azcmagent` status `Connected`, `connection.type` `gateway` when enabled, and Azure Local partner `SolutionVersion` equal to `TargetSolutionVersion` in `lab-config.psd1`.
+
+A machine that is merely Arc `Connected` is not sufficient. Use `repair-arc-node.ps1` for targeted recovery when a node lacks Azure Local partner metadata; preserve the shared gateway and healthy nodes.

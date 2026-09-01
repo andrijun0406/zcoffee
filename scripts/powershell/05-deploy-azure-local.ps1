@@ -43,6 +43,11 @@ param(
     [switch]$UseArcGateway,
     [string]$ArcGatewayID,
     [string]$ArcGatewayName,
+    [string]$TargetSolutionVersion,
+    [string[]]$NodeIPs,
+    [ValidateSet('HTTP','HTTPS')]
+    [string]$Transport = 'HTTP',
+    [int]$Port,
     [switch]$UseExistingAzLogin,
     # Unattended service-principal / managed-identity auth (zero-touch).
     [string]$ServicePrincipalId,
@@ -63,6 +68,7 @@ $ErrorActionPreference = 'Stop'
 
 $cfg = Import-LabConfig
 $b   = $PSBoundParameters
+$script:nodeCredential = $null
 
 $SubscriptionId    = Resolve-Setting -Name 'SubscriptionId'    -Bound $b -Current $SubscriptionId    -ConfigKey 'SubscriptionId' -Config $cfg
 $TenantId          = Resolve-Setting -Name 'TenantId'          -Bound $b -Current $TenantId          -ConfigKey 'TenantId'       -Config $cfg
@@ -77,6 +83,9 @@ if (-not $LocalAdminUser) { $LocalAdminUser = 'Administrator' }
 $UseArcGateway     = [bool](Resolve-Setting -Name 'UseArcGateway' -Bound $b -Current ([bool]$UseArcGateway) -ConfigKey 'UseArcGateway' -Config $cfg)
 $ArcGatewayName    = Resolve-Setting -Name 'ArcGatewayName' -Bound $b -Current $ArcGatewayName -ConfigKey 'ArcGatewayName' -Config $cfg
 $ArcGatewayID      = Resolve-Setting -Name 'ArcGatewayID' -Bound $b -Current $ArcGatewayID -ConfigKey 'ArcGatewayID' -Config $cfg
+$TargetSolutionVersion = Resolve-Setting -Name 'TargetSolutionVersion' -Bound $b -Current $TargetSolutionVersion -ConfigKey 'TargetSolutionVersion' -Config $cfg
+if (-not $Port) { $Port = if ($Transport -eq 'HTTPS') { 5986 } else { 5985 } }
+if (-not $b.ContainsKey('NodeIPs')) { if ($cfg.ContainsKey('Nodes')) { $NodeIPs = @($cfg.Nodes | ForEach-Object { $_.HostIP }) } }
 
 if (-not $SubscriptionId) { throw 'SubscriptionId is required. Pass -SubscriptionId (from your private runbook).' }
 
@@ -216,6 +225,32 @@ try {
                 }
                 Write-Ok "Arc node Connected: $name"
             }
+
+            if ($script:TargetSolutionVersion -and $script:NodeIPs) {
+                if (-not $script:nodeCredential) {
+                    if ($b.ContainsKey('LocalAdminPassword') -and $null -ne $script:LocalAdminPassword) {
+                        $script:nodeCredential = [System.Management.Automation.PSCredential]::new(".\$script:LocalAdminUser", $script:LocalAdminPassword)
+                    } else { $script:nodeCredential = Get-LabNodeCredential -User $script:LocalAdminUser }
+                }
+                $nodeByName = @{}
+                if ($cfg.ContainsKey('Nodes')) { foreach ($n in $cfg.Nodes) { $nodeByName[$n.Name] = $n.HostIP } }
+                foreach ($id in $arcIds) {
+                    $name = ($id -split '/')[-1]
+                    if (-not $nodeByName.ContainsKey($name)) { throw "No HostIP mapping found for Arc node $name." }
+                    $conn = @{ ComputerName=$nodeByName[$name]; Credential=$script:nodeCredential; Port=$script:Port; Authentication='Negotiate'; ErrorAction='Stop' }
+                    if ($script:Transport -eq 'HTTPS') { $conn['UseSSL']=$true }
+                    $state = Invoke-Command @conn -ScriptBlock {
+                        $exe = "$env:ProgramFiles\AzureConnectedMachineAgent\azcmagent.exe"
+                        $j = ((& $exe show -j 2>$null | Out-String) | ConvertFrom-Json)
+                        $p = (& $exe partnerconfig get SolutionVersion --partner AzureLocal 2>&1 | Out-String).Trim()
+                        [pscustomobject]@{ Status=[string]$j.status; Gateway=((& $exe config get connection.type 2>&1 | Out-String).Trim()); Partner=$p }
+                    }
+                    if ($state.Status -ne 'Connected') { throw "Arc node $name is not Connected." }
+                    if ($script:UseArcGateway -and $state.Gateway -notmatch '(?i)^gateway$') { throw "Arc node $name is not using gateway mode." }
+                    if ($state.Partner -notmatch "(?m)^\s*$([regex]::Escape($script:TargetSolutionVersion))\s*$") { throw "Arc node $name lacks AzureLocal partner SolutionVersion $script:TargetSolutionVersion. Run Stage 4 Register." }
+                    Write-Ok "Arc node composite readiness verified: $name"
+                }
+            }
         }
     }
 
@@ -252,7 +287,7 @@ try {
                 foreach ($item in $Value) {
                     $items += ,(ConvertTo-ArmParameterValue $item)
                 }
-                return ,$items
+                return $items
             }
             return $Value
         }

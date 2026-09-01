@@ -198,3 +198,10 @@ run against the jump host:
   exist" are normal in Validate (Register mode installs modules + creates the RG).
 - **Service-principal auth added** to Stages 4-5 via `Connect-AzForStage` (precedence: SP secret ->
   SP cert -> managed identity -> existing login -> device-code) for unattended runs.
+
+
+## Arc Gateway and partner-metadata recovery
+
+Stage 4 created `zcoffee-arcgw`, associated both existing Arc machines through the Hybrid Compute settings endpoint, and verified `connection.type=gateway` with Arc status `Connected`. The node credential store was corrected to trim the DPAPI blob newline, making Stage 4 zero-touch under the same jump-host identity.
+
+A later eligibility check showed node 2 was Arc `Connected` but returned `Unknown partner: azurelocal`, while node 1 reported `12.2604.1003`. The cause was the previous Stage 4 optimization that skipped initialization for any already-connected node. The permanent fix passes `TargetSolutionVersion` during fresh initialization, performs a post-initialization probe, and makes Stage 5 verify the composite readiness state before deployment.

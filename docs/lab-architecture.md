@@ -49,3 +49,10 @@ Pattern `azl<location><instance><role>`, lowercase, **no hyphens** in DNS/Azure 
 ## Best practice
 - Keep tenant IDs, subscription IDs, and secrets in the private runbook, never in the repo.
 - Adapter names must match reality exactly (including spaces) or Stage 5 Network ATC fails.
+
+
+## Arc Gateway and Azure Local partner registration
+
+The lab uses one public Arc Gateway, `zcoffee-arcgw`, in the Azure Local resource group. Its resource ID is persisted locally in `config/arc-gateway.local.json` and must be reused after node reimage when the subscription and resource group remain unchanged.
+
+The Arc readiness contract is composite rather than status-only: each node must report Arc `Connected`, `connection.type=gateway` when the gateway is enabled, and an Azure Local partner `SolutionVersion` matching the configured `TargetSolutionVersion`. The current lab target is `12.2604.1003`, which must be treated as a matched OS/solution/SBE experiment on this unsupported PowerEdge R650 lab platform.

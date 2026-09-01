@@ -35,14 +35,13 @@ Workflow: edit on PC -> commit/push in VS Code -> `git pull` on jump host.
   post-install network bake (hostname, VLAN 230, static IP, WinRM, RDP) keyed by service tag + MAC.
 - Stage 2 (network validate): PASS both nodes (storage 25GbE up after DC cabling; media-state check fixed).
 - Stage 3 (node readiness + Env Checker): PASS both nodes.
-- Stage 4 (Arc register): DONE - both nodes Status=Connected in azljkt01rg via cert SP.
+- Stage 4 (Arc register): DONE - both nodes Status=Connected, gateway-enabled, and Azure Local partner metadata verified.
   Resource ids: /subscriptions/859c.../resourceGroups/azljkt01rg/providers/Microsoft.HybridCompute/machines/azljkt01n1 (and .../azljkt01n2)
-- Stage 5 (cloud deploy): NOT RUN - blocked on missing azuredeploy.json ARM template in arm-templates/ (only param files exist).
+- Stage 5 (cloud deploy): ARM Validate passed; deployment rejected by Azure because the installed OS/solution eligibility was unsupported for the selected deployment.
 - Stage 6 (validate cluster): NOT RUN.
 
 ## OPEN ITEMS for the fresh session
-1. Arc Gateway: ODIN chose "Arc Gateway: Enabled" but scripts do NOT implement it. Add Arc Gateway
-   resource + pass -ArcGatewayID in Stage 4 and gateway id in Stage 5 params to reduce endpoint set.
+1. Arc Gateway: implemented. Stage 4 creates/reuses the gateway, persists its resource ID, associates existing machines, and passes `ArcGatewayID` to fresh registration.
 2. Node FQDN: nodes are WORKGROUP (Local Identity) so FQDN is not azljkt01n1.zcoffee.com. If desired,
    network-bake specialize should set primary DNS suffix (NV Domain / Domain = zcoffee.com).
 3. Stage 5 ARM template azuredeploy.json still required (from Dell/Microsoft Azure Local deploy package).
@@ -77,3 +76,10 @@ Workflow: edit on PC -> commit/push in VS Code -> `git pull` on jump host.
 - deployment-journey.md: chronological history/state narrative (what happened, in order).
 - deployment-guide.md: detailed runbook - every stage, every parameter explained.
 - deployment-handoff.md: THIS file - the master prompt to resume.
+
+
+## Partner metadata lesson
+
+`Connected` is not a sufficient Stage 4 success condition. Azure Local eligibility also depends on the Azure Local partner registration. The current scripts require `TargetSolutionVersion` and verify `azcmagent partnerconfig get SolutionVersion --partner AzureLocal` on every node. A missing partner returns `Unknown partner: azurelocal` and blocks Stage 5.
+
+For a single affected node, preserve the shared gateway and healthy nodes, remove only the affected Arc machine/extensions, disconnect its local agent with `--force-local-only`, and use `repair-arc-node.ps1` to re-register it.

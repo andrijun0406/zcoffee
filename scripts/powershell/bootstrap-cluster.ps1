@@ -1,4 +1,4 @@
-[CmdletBinding()]
+﻿[CmdletBinding()]
 param(
     [ValidateSet(
         '01-deploy-os','02-configure-network','03-prepare-node',
@@ -56,7 +56,8 @@ param(
     [switch]$UseArcGateway,
     [string]$ArcGatewayID,
     [string]$ArcGatewayName,
-    [int]$ArcGatewayTimeoutMin,
+    [int]$ArcGatewayTimeoutMin = 120,
+    [string]$TargetSolutionVersion,
     [string]$SubscriptionId,
     [string]$TenantId,
     [string]$ResourceGroupName,
