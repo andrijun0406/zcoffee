@@ -41,6 +41,21 @@ if (-not $ArcGatewayID) { throw 'ArcGatewayID is required or must exist in confi
 
 Import-Module Az.Accounts -ErrorAction Stop
 Import-Module Az.Resources -ErrorAction Stop
+
+# Az.ConnectedMachine is not included by Az.Accounts/Az.Resources. Install it
+# for the executing Windows identity when the repair helper is run on a fresh
+# jump host. No Azure resources are changed by this block.
+$cmModule = Get-Module -ListAvailable -Name Az.ConnectedMachine |
+    Sort-Object Version -Descending |
+    Select-Object -First 1
+if (-not $cmModule) {
+    if (-not (Get-Command Install-Module -ErrorAction SilentlyContinue)) {
+        throw 'Az.ConnectedMachine is missing and Install-Module is unavailable. Install PowerShellGet/NuGet, then install Az.ConnectedMachine.'
+    }
+    try { Set-PSRepository PSGallery -InstallationPolicy Trusted -ErrorAction SilentlyContinue } catch { }
+    Write-Host 'Az.ConnectedMachine is missing; installing it for the current Windows account...' -ForegroundColor Yellow
+    Install-Module Az.ConnectedMachine -Scope CurrentUser -Force -AllowClobber -ErrorAction Stop
+}
 Import-Module Az.ConnectedMachine -ErrorAction Stop
 if ($UseExistingAzLogin) {
     $ctx = Get-AzContext -ErrorAction Stop
