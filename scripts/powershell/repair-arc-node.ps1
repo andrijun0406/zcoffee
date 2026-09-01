@@ -76,7 +76,7 @@ function Invoke-ArmDelete {
         throw 'Invoke-AzRestMethod is unavailable. Install/import Az.Accounts before running recovery.'
     }
 
-    $path = "$ResourceId?api-version=$ApiVersion"
+    $path = '{0}?api-version={1}' -f $ResourceId.TrimEnd('?'), $ApiVersion
     Write-Host "Deleting $Description via ARM REST..." -ForegroundColor Yellow
 
     try {
