@@ -11,7 +11,8 @@ param(
     [string]$LocalAdminUser = 'Administrator',
     [SecureString]$LocalAdminPassword,
     [switch]$UseExistingAzLogin,
-    [switch]$AutoApprove
+    [switch]$AutoApprove,
+    [switch]$RemoveMachineResourceLocks
 )
 
 Set-StrictMode -Version Latest
@@ -42,12 +43,53 @@ $confirmation = if ($AutoApprove) { 'YES' } else {
 }
 if ($confirmation -cne 'YES') { throw 'Recovery cancelled.' }
 
+function Invoke-ArmRequest {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)][ValidateSet('GET','DELETE')][string]$Method,
+        [Parameter(Mandatory = $true)][string]$ResourceId,
+        [Parameter(Mandatory = $true)][string]$ApiVersion
+    )
+
+    $restCommand = Get-Command Invoke-AzRestMethod -ErrorAction SilentlyContinue
+    if (-not $restCommand) {
+        throw 'Invoke-AzRestMethod is unavailable. Install/import Az.Accounts before running recovery.'
+    }
+
+    $path = '{0}?api-version={1}' -f $ResourceId.TrimEnd([char[]]@('/','?')), $ApiVersion
+    try {
+        return Invoke-AzRestMethod -Method $Method -Path $path -ErrorAction Stop
+    } catch {
+        $detail = $_.Exception.Message
+        if ($_.ErrorDetails -and $_.ErrorDetails.Message) {
+            $detail = '{0} {1}' -f $detail, $_.ErrorDetails.Message
+        }
+        throw "ARM $Method failed for $ResourceId : $detail"
+    }
+}
+
+function Get-ArmResponseStatus {
+    param([Parameter(Mandatory = $true)]$Response)
+    if ($Response.PSObject.Properties.Name -contains 'StatusCode') {
+        return [int]$Response.StatusCode
+    }
+    return 200
+}
+
+function Get-ArmResponseJson {
+    param([Parameter(Mandatory = $true)]$Response)
+    if ($Response.PSObject.Properties.Name -contains 'Content' -and $Response.Content) {
+        try { return ($Response.Content | ConvertFrom-Json) } catch { }
+    }
+    return $null
+}
+
 function Wait-ArmResourceGone {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory = $true)][string]$ResourceId,
         [Parameter(Mandatory = $true)][string]$Description,
-        [int]$TimeoutSeconds = 600
+        [int]$TimeoutSeconds = 900
     )
 
     $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
@@ -57,45 +99,40 @@ function Wait-ArmResourceGone {
             Write-Host "$Description is absent." -ForegroundColor DarkYellow
             return
         }
-        Start-Sleep -Seconds 10
+        Start-Sleep -Seconds 15
     } while ((Get-Date) -lt $deadline)
 
     throw "Timed out waiting for $Description to be deleted."
 }
 
-function Invoke-ArmDelete {
+function Remove-ArmResource {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory = $true)][string]$ResourceId,
         [Parameter(Mandatory = $true)][string]$Description,
-        [string]$ApiVersion = '2023-10-03'
+        [Parameter(Mandatory = $true)][string]$ApiVersion
     )
 
-    $restCommand = Get-Command Invoke-AzRestMethod -ErrorAction SilentlyContinue
-    if (-not $restCommand) {
-        throw 'Invoke-AzRestMethod is unavailable. Install/import Az.Accounts before running recovery.'
-    }
-
-    $path = '{0}?api-version={1}' -f $ResourceId.TrimEnd('?'), $ApiVersion
     Write-Host "Deleting $Description via ARM REST..." -ForegroundColor Yellow
-
-    try {
-        $response = Invoke-AzRestMethod -Method DELETE -Path $path -ErrorAction Stop
-        $status = if ($response.PSObject.Properties.Name -contains 'StatusCode') {
-            [int]$response.StatusCode
-        } else { 204 }
-
-        if ($status -notin @(200, 202, 204)) {
-            throw "ARM DELETE returned HTTP $status for $Description."
-        }
-    } catch {
-        $message = $_.Exception.Message
-        if ($message -match '404|NotFound|ResourceNotFound') {
-            Write-Host "$Description is already absent." -ForegroundColor DarkYellow
-        } else {
-            throw "ARM DELETE failed for $Description : $message"
-        }
+    $response = Invoke-ArmRequest -Method DELETE -ResourceId $ResourceId -ApiVersion $ApiVersion
+    $status = Get-ArmResponseStatus -Response $response
+    if ($status -notin @(200, 202, 204)) {
+        throw "ARM DELETE returned HTTP $status for $Description."
     }
+}
+
+function Get-MachineLocks {
+    [CmdletBinding()]
+    param([Parameter(Mandatory = $true)][string]$ResourceId)
+
+    $lockCollectionId = '{0}/providers/Microsoft.Authorization/locks' -f $ResourceId.TrimEnd('/')
+    $response = Invoke-ArmRequest `
+        -Method GET `
+        -ResourceId $lockCollectionId `
+        -ApiVersion '2016-09-01'
+    $body = Get-ArmResponseJson -Response $response
+    if ($body -and $body.value) { return @($body.value) }
+    return @()
 }
 
 Write-Host "Disconnecting local Arc state on $NodeName before Azure resource cleanup..." -ForegroundColor Cyan
@@ -126,53 +163,40 @@ Invoke-Command `
         }
     } | Out-Host
 
-$extensionResources = @(
-    Get-AzResource `
-        -ResourceGroupName $ResourceGroupName `
-        -ResourceType 'Microsoft.HybridCompute/machines/extensions' `
-        -ErrorAction SilentlyContinue |
-        Where-Object {
-            $_.ResourceId -like "$machineResourceId/extensions/*"
-        }
-)
-
-foreach ($extension in $extensionResources) {
-    $extensionId = if ($extension.PSObject.Properties.Name -contains 'ResourceId' -and $extension.ResourceId) {
-        [string]$extension.ResourceId
-    } elseif ($extension.PSObject.Properties.Name -contains 'Id' -and $extension.Id) {
-        [string]$extension.Id
-    } else {
-        throw "Could not determine resource ID for extension $($extension.Name)."
-    }
-
-    Invoke-ArmDelete `
-        -ResourceId $extensionId `
-        -Description "$NodeName extension $($extension.Name)"
-
-    Wait-ArmResourceGone `
-        -ResourceId $extensionId `
-        -Description "$NodeName extension $($extension.Name)"
+$locks = @(Get-MachineLocks -ResourceId $machineResourceId)
+if ($locks.Count -gt 0 -and -not $RemoveMachineResourceLocks) {
+    $lockNames = ($locks | ForEach-Object { $_.name }) -join ', '
+    throw "Resource lock(s) exist on $NodeName ($lockNames). Remove them in Azure or rerun with -RemoveMachineResourceLocks after review."
 }
 
-Write-Host 'Enumerating the targeted Azure Arc resource before deletion...' -ForegroundColor Cyan
+if ($locks.Count -gt 0) {
+    foreach ($lock in $locks) {
+        $lockId = [string]$lock.id
+        if (-not $lockId) { throw "A machine lock was found but its resource ID could not be determined." }
+        Remove-ArmResource `
+            -ResourceId $lockId `
+            -Description "$NodeName machine resource lock" `
+            -ApiVersion '2016-09-01'
+        Wait-ArmResourceGone `
+            -ResourceId $lockId `
+            -Description "$NodeName machine resource lock"
+    }
+}
+
+Write-Host "Deleting the parent Arc machine resource for $NodeName..." -ForegroundColor Cyan
 $machine = Get-AzResource -ResourceId $machineResourceId -ErrorAction SilentlyContinue
 if ($machine) {
-    Invoke-ArmDelete `
+    # Azure Local-managed child extensions are intentionally not deleted one by one.
+    # The documented repair flow deletes the faulty Arc machine resource.
+    Remove-ArmResource `
         -ResourceId $machineResourceId `
-        -Description "$NodeName Arc resource"
+        -Description "$NodeName Arc machine resource" `
+        -ApiVersion '2023-10-03-preview'
+    Wait-ArmResourceGone `
+        -ResourceId $machineResourceId `
+        -Description "$NodeName Arc machine resource"
 } else {
     Write-Host "Azure Arc machine $NodeName is already absent." -ForegroundColor Yellow
-}
-
-$deadline = (Get-Date).AddMinutes(10)
-do {
-    $remaining = Get-AzResource -ResourceId $machineResourceId -ErrorAction SilentlyContinue
-    if (-not $remaining) { break }
-    Start-Sleep -Seconds 15
-} while ((Get-Date) -lt $deadline)
-
-if ($remaining) {
-    throw "Timed out waiting for Azure Arc resource deletion: $NodeName"
 }
 
 $stage4 = Join-Path $PSScriptRoot '04-register-arc.ps1'
