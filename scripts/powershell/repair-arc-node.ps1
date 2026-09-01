@@ -42,27 +42,59 @@ $confirmation = if ($AutoApprove) { 'YES' } else {
 }
 if ($confirmation -cne 'YES') { throw 'Recovery cancelled.' }
 
-function Remove-ExactAzResource {
-    [CmdletBinding(SupportsShouldProcess = $true)]
+function Wait-ArmResourceGone {
+    [CmdletBinding()]
     param(
         [Parameter(Mandatory = $true)][string]$ResourceId,
-        [Parameter(Mandatory = $true)][string]$Description
+        [Parameter(Mandatory = $true)][string]$Description,
+        [int]$TimeoutSeconds = 600
     )
 
-    $removeCommand = Get-Command Remove-AzResource -ErrorAction Stop
-    $removeArgs = @{
-        ResourceId = $ResourceId
-        ErrorAction = 'Stop'
+    $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
+    do {
+        $present = Get-AzResource -ResourceId $ResourceId -ErrorAction SilentlyContinue
+        if (-not $present) {
+            Write-Host "$Description is absent." -ForegroundColor DarkYellow
+            return
+        }
+        Start-Sleep -Seconds 10
+    } while ((Get-Date) -lt $deadline)
+
+    throw "Timed out waiting for $Description to be deleted."
+}
+
+function Invoke-ArmDelete {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)][string]$ResourceId,
+        [Parameter(Mandatory = $true)][string]$Description,
+        [string]$ApiVersion = '2023-10-03'
+    )
+
+    $restCommand = Get-Command Invoke-AzRestMethod -ErrorAction SilentlyContinue
+    if (-not $restCommand) {
+        throw 'Invoke-AzRestMethod is unavailable. Install/import Az.Accounts before running recovery.'
     }
 
-    # Use the common confirmation switch only when the installed cmdlet exposes it.
-    if ($removeCommand.Parameters.Keys -contains 'Confirm') {
-        $removeArgs['Confirm'] = $false
-    }
+    $path = "$ResourceId?api-version=$ApiVersion"
+    Write-Host "Deleting $Description via ARM REST..." -ForegroundColor Yellow
 
-    if ($PSCmdlet.ShouldProcess($Description, 'Remove')) {
-        & $removeCommand @removeArgs | Out-Null
-        Write-Host "Removed $Description" -ForegroundColor Yellow
+    try {
+        $response = Invoke-AzRestMethod -Method DELETE -Path $path -ErrorAction Stop
+        $status = if ($response.PSObject.Properties.Name -contains 'StatusCode') {
+            [int]$response.StatusCode
+        } else { 204 }
+
+        if ($status -notin @(200, 202, 204)) {
+            throw "ARM DELETE returned HTTP $status for $Description."
+        }
+    } catch {
+        $message = $_.Exception.Message
+        if ($message -match '404|NotFound|ResourceNotFound') {
+            Write-Host "$Description is already absent." -ForegroundColor DarkYellow
+        } else {
+            throw "ARM DELETE failed for $Description : $message"
+        }
     }
 }
 
@@ -78,9 +110,19 @@ Invoke-Command `
             throw "azcmagent.exe not found on $env:COMPUTERNAME"
         }
 
-        & $exe disconnect --force-local-only 2>&1 | Out-Host
-        if ($LASTEXITCODE -ne 0) {
-            throw "azcmagent disconnect failed with exit code $LASTEXITCODE"
+        $status = $null
+        try {
+            $json = ((& $exe show -j 2>$null | Out-String) | ConvertFrom-Json)
+            $status = [string]$json.status
+        } catch { }
+
+        if ($status -eq 'Connected') {
+            & $exe disconnect --force-local-only 2>&1 | Out-Host
+            if ($LASTEXITCODE -ne 0) {
+                throw "azcmagent disconnect failed with exit code $LASTEXITCODE"
+            }
+        } else {
+            Write-Host "Local Arc state is already disconnected (status: $status)." -ForegroundColor DarkYellow
         }
     } | Out-Host
 
@@ -103,14 +145,19 @@ foreach ($extension in $extensionResources) {
         throw "Could not determine resource ID for extension $($extension.Name)."
     }
 
-    Remove-ExactAzResource `
+    Invoke-ArmDelete `
+        -ResourceId $extensionId `
+        -Description "$NodeName extension $($extension.Name)"
+
+    Wait-ArmResourceGone `
         -ResourceId $extensionId `
         -Description "$NodeName extension $($extension.Name)"
 }
 
+Write-Host 'Enumerating the targeted Azure Arc resource before deletion...' -ForegroundColor Cyan
 $machine = Get-AzResource -ResourceId $machineResourceId -ErrorAction SilentlyContinue
 if ($machine) {
-    Remove-ExactAzResource `
+    Invoke-ArmDelete `
         -ResourceId $machineResourceId `
         -Description "$NodeName Arc resource"
 } else {
