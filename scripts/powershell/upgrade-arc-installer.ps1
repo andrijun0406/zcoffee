@@ -1,4 +1,4 @@
-﻿#requires -Version 5.1
+#requires -Version 5.1
 [CmdletBinding()]
 param(
     [Parameter(Mandatory = $true)]
@@ -7,143 +7,210 @@ param(
     [Parameter(Mandatory = $true)]
     [System.Management.Automation.PSCredential]$Credential,
 
-    [switch]$UseSSL,
-    [int]$Port = 5985
+    [string]$SourceNodeIP = '10.8.230.232',
+    [ValidateSet('HTTP','HTTPS')]
+    [string]$Transport = 'HTTP',
+    [int]$Port,
+    [switch]$SkipSourceCopy
 )
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
-$sessionArgs = @{
-    ComputerName = $NodeIP
-    Credential   = $Credential
-    ErrorAction  = 'Stop'
-    Port         = $Port
-}
-if ($UseSSL) { $sessionArgs['UseSSL'] = $true }
-
-$s = New-PSSession @sessionArgs
-try {
-    $result = Invoke-Command -Session $s -ScriptBlock {
-        Set-StrictMode -Version Latest
-        $ErrorActionPreference = 'Stop'
-
-        $moduleName = 'AzSHCI.ARCInstaller'
-        $moduleRoot = Join-Path $env:ProgramFiles 'WindowsPowerShell\Modules'
-        $powershell = Join-Path $PSHOME 'powershell.exe'
-
-        function Get-ArcCapability {
-            $mods = @(Get-Module -ListAvailable -Name $moduleName |
-                Sort-Object Version -Descending)
-            if ($mods.Count -eq 0) { return $null }
-
-            $cmd = Get-Command Invoke-AzStackHciArcInitialization `
-                -ErrorAction SilentlyContinue
-            if (-not $cmd) {
-                Import-Module $mods[0].Path -Force -ErrorAction Stop
-                $cmd = Get-Command Invoke-AzStackHciArcInitialization `
-                    -ErrorAction SilentlyContinue
-            }
-            if (-not $cmd) { return $null }
-
-            [pscustomobject]@{
-                ModuleVersion                 = $mods[0].Version.ToString()
-                ModulePath                    = $mods[0].Path
-                SupportsTargetSolutionVersion = ($cmd.Parameters.Keys -contains 'TargetSolutionVersion')
-                SupportsArcGatewayID          = ($cmd.Parameters.Keys -contains 'ArcGatewayID')
-            }
-        }
-
-        $before = Get-ArcCapability
-        if ($before -and $before.SupportsTargetSolutionVersion) {
-            [pscustomobject]@{
-                Node                          = $env:COMPUTERNAME
-                Action                        = 'Already supported'
-                ModuleVersion                 = $before.ModuleVersion
-                ModulePath                    = $before.ModulePath
-                SupportsTargetSolutionVersion = $before.SupportsTargetSolutionVersion
-                SupportsArcGatewayID          = $before.SupportsArcGatewayID
-            }
-            return
-        }
-
-        $bootstrap = Join-Path $env:TEMP 'zcoffee-install-arcinstaller.ps1'
-        @'
-[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
-$ErrorActionPreference = 'Stop'
-$moduleName = 'AzSHCI.ARCInstaller'
-$moduleRoot = Join-Path $env:ProgramFiles 'WindowsPowerShell\Modules'
-
-try {
-    Install-PackageProvider -Name NuGet -MinimumVersion 2.8.5.201 `
-        -Force -ErrorAction Stop | Out-Null
-} catch {
-    # The provider may already be installed; Find/Save-Module gives the real error if not.
+if (-not $Port) {
+    $Port = if ($Transport -eq 'HTTPS') { 5986 } else { 5985 }
 }
 
-try {
-    Set-PSRepository -Name PSGallery -InstallationPolicy Trusted `
-        -ErrorAction Stop
-} catch {
-    # Continue; an existing repository policy is sufficient.
+function New-NodeSession {
+    param([string]$ComputerName)
+
+    $args = @{
+        ComputerName = $ComputerName
+        Credential   = $Credential
+        Port         = $Port
+        ErrorAction  = 'Stop'
+    }
+    if ($Transport -eq 'HTTPS') { $args['UseSSL'] = $true }
+    New-PSSession @args
 }
 
-$latest = Find-Module -Name $moduleName -Repository PSGallery `
-    -ErrorAction Stop | Sort-Object Version -Descending | Select-Object -First 1
-if (-not $latest) { throw "No PSGallery package found for $moduleName." }
+$inspect = {
+    Set-StrictMode -Version Latest
+    $ErrorActionPreference = 'Stop'
+    $moduleName = 'AzSHCI.ARCInstaller'
+    $mods = @(Get-Module -ListAvailable -Name $moduleName |
+        Sort-Object Version -Descending)
 
-New-Item -ItemType Directory -Path $moduleRoot -Force | Out-Null
-Save-Module -Name $moduleName `
-    -Repository PSGallery `
-    -RequiredVersion $latest.Version `
-    -Path $moduleRoot `
-    -Force `
-    -ErrorAction Stop
-
-Write-Output ("Saved {0} {1}" -f $moduleName, $latest.Version)
-'@ | Set-Content -LiteralPath $bootstrap -Encoding UTF8
-
-        $stdoutLog = Join-Path $env:TEMP 'zcoffee-install-arcinstaller.stdout.log'
-        $stderrLog = Join-Path $env:TEMP 'zcoffee-install-arcinstaller.stderr.log'
-        Remove-Item $stdoutLog, $stderrLog -Force -ErrorAction SilentlyContinue
-        $p = Start-Process -FilePath $powershell `
-            -ArgumentList @(
-                '-NoProfile',
-                '-NonInteractive',
-                '-ExecutionPolicy', 'Bypass',
-                '-File', $bootstrap
-            ) `
-            -Wait -PassThru -RedirectStandardOutput $stdoutLog -RedirectStandardError $stderrLog
-
-        if ($p.ExitCode -ne 0) {
-            $outDetail = if (Test-Path $stdoutLog) { Get-Content $stdoutLog -Raw } else { '' }
-            $errDetail = if (Test-Path $stderrLog) { Get-Content $stderrLog -Raw } else { '' }
-            throw "Clean module-save process failed with exit code $($p.ExitCode). $outDetail $errDetail"
-        }
-
-        Remove-Item $bootstrap -Force -ErrorAction SilentlyContinue
-
-        # Load the highest available copy only after the child process exits.
-        Remove-Module $moduleName -Force -ErrorAction SilentlyContinue
-        $after = Get-ArcCapability
-        if (-not $after) {
-            throw "$moduleName was not discoverable after Save-Module."
-        }
-        if (-not $after.SupportsTargetSolutionVersion) {
-            throw "Latest installed $moduleName version $($after.ModuleVersion) still does not support TargetSolutionVersion."
-        }
-
-        [pscustomobject]@{
+    if ($mods.Count -eq 0) {
+        return [pscustomobject]@{
             Node                          = $env:COMPUTERNAME
-            Action                        = 'Upgraded side-by-side'
-            ModuleVersion                 = $after.ModuleVersion
-            ModulePath                    = $after.ModulePath
-            SupportsTargetSolutionVersion = $after.SupportsTargetSolutionVersion
-            SupportsArcGatewayID          = $after.SupportsArcGatewayID
+            ModuleVersion                 = $null
+            ModulePath                    = $null
+            ModuleBase                    = $null
+            SupportsTargetSolutionVersion = $false
+            SupportsArcGatewayID          = $false
         }
     }
-    $result
+
+    $best = $mods[0]
+    Remove-Module $moduleName -Force -ErrorAction SilentlyContinue
+    Import-Module $best.Path -Force -ErrorAction Stop
+    $cmd = Get-Command Invoke-AzStackHciArcInitialization -ErrorAction Stop
+
+    [pscustomobject]@{
+        Node                          = $env:COMPUTERNAME
+        ModuleVersion                 = $best.Version.ToString()
+        ModulePath                    = $best.Path
+        ModuleBase                    = $best.ModuleBase
+        SupportsTargetSolutionVersion = ($cmd.Parameters.Keys -contains 'TargetSolutionVersion')
+        SupportsArcGatewayID          = ($cmd.Parameters.Keys -contains 'ArcGatewayID')
+    }
+}
+
+$verify = {
+    Set-StrictMode -Version Latest
+    $ErrorActionPreference = 'Stop'
+    $moduleName = 'AzSHCI.ARCInstaller'
+    $mods = @(Get-Module -ListAvailable -Name $moduleName |
+        Sort-Object Version -Descending)
+    if ($mods.Count -eq 0) {
+        throw "$moduleName is not installed."
+    }
+    $best = $mods[0]
+    Remove-Module $moduleName -Force -ErrorAction SilentlyContinue
+    Import-Module $best.Path -Force -ErrorAction Stop
+    $cmd = Get-Command Invoke-AzStackHciArcInitialization -ErrorAction Stop
+    [pscustomobject]@{
+        Node                          = $env:COMPUTERNAME
+        ModuleVersion                 = $best.Version.ToString()
+        ModulePath                    = $best.Path
+        SupportsTargetSolutionVersion = ($cmd.Parameters.Keys -contains 'TargetSolutionVersion')
+        SupportsArcGatewayID          = ($cmd.Parameters.Keys -contains 'ArcGatewayID')
+    }
+}
+
+$source = $null
+$target = $null
+$archiveLocal = Join-Path $env:TEMP ('zcoffee-arcinstaller-{0}.zip' -f ([guid]::NewGuid().ToString('N')))
+$archiveRemoteName = 'zcoffee-arcinstaller.zip'
+
+try {
+    Write-Host "Inspecting target node $NodeIP..." -ForegroundColor Cyan
+    $target = New-NodeSession -ComputerName $NodeIP
+    $targetBefore = Invoke-Command -Session $target -ScriptBlock $inspect
+    $targetBefore | Format-List
+
+    if ($targetBefore.SupportsTargetSolutionVersion -and
+        $targetBefore.SupportsArcGatewayID) {
+        Write-Host 'Target already supports Arc Gateway and TargetSolutionVersion.' -ForegroundColor Green
+        return $targetBefore
+    }
+
+    if ($SkipSourceCopy) {
+        throw 'Target lacks TargetSolutionVersion support and -SkipSourceCopy was specified.'
+    }
+
+    if ($SourceNodeIP -eq $NodeIP) {
+        throw 'SourceNodeIP must be different from NodeIP.'
+    }
+
+    Write-Host "Inspecting known-good source node $SourceNodeIP..." -ForegroundColor Cyan
+    $source = New-NodeSession -ComputerName $SourceNodeIP
+    $sourceInfo = Invoke-Command -Session $source -ScriptBlock $inspect
+    $sourceInfo | Format-List
+
+    if (-not $sourceInfo.ModuleBase) {
+        throw "No $($sourceInfo.ModuleVersion) module found on source node $SourceNodeIP."
+    }
+    if (-not $sourceInfo.SupportsTargetSolutionVersion) {
+        throw "Source node $SourceNodeIP does not support TargetSolutionVersion; refusing to copy an unsuitable module."
+    }
+    if (-not $sourceInfo.SupportsArcGatewayID) {
+        throw "Source node $SourceNodeIP does not support ArcGatewayID; refusing to copy an unsuitable module."
+    }
+
+    $remoteArchive = Join-Path $env:TEMP $archiveRemoteName
+    Invoke-Command -Session $source -ScriptBlock {
+        param($moduleBase, $archivePath)
+        if (Test-Path -LiteralPath $archivePath) {
+            Remove-Item -LiteralPath $archivePath -Force
+        }
+        Compress-Archive -Path (Join-Path $moduleBase '*') `
+            -DestinationPath $archivePath -Force -ErrorAction Stop
+    } -ArgumentList $sourceInfo.ModuleBase, $remoteArchive | Out-Null
+
+    Write-Host 'Copying the known-good module to the jump host...' -ForegroundColor Yellow
+    Copy-Item -FromSession $source -LiteralPath $remoteArchive `
+        -Destination $archiveLocal -Force -ErrorAction Stop
+
+    $targetModuleRoot = Split-Path $targetBefore.ModuleBase -Parent
+    $targetArchive = Join-Path $env:TEMP $archiveRemoteName
+    Write-Host "Copying module to $NodeIP..." -ForegroundColor Yellow
+    Copy-Item -ToSession $target -LiteralPath $archiveLocal `
+        -Destination $targetArchive -Force -ErrorAction Stop
+
+    Invoke-Command -Session $target -ScriptBlock {
+        param($archivePath, $moduleBase)
+        $parent = Split-Path $moduleBase -Parent
+        New-Item -ItemType Directory -Path $parent -Force | Out-Null
+        if (Test-Path -LiteralPath $moduleBase) {
+            Remove-Item -LiteralPath $moduleBase -Recurse -Force
+        }
+        New-Item -ItemType Directory -Path $moduleBase -Force | Out-Null
+        Expand-Archive -LiteralPath $archivePath -DestinationPath $moduleBase -Force
+        Remove-Item -LiteralPath $archivePath -Force -ErrorAction SilentlyContinue
+    } -ArgumentList $targetBefore.ModuleBase, $targetBefore.ModuleBase | Out-Null
+
+    Write-Host 'Verifying module capability in a fresh remote PowerShell process...' -ForegroundColor Cyan
+    $after = Invoke-Command -Session $target -ScriptBlock {
+        $script = @'
+$ErrorActionPreference = 'Stop'
+$moduleName = 'AzSHCI.ARCInstaller'
+$mods = @(Get-Module -ListAvailable -Name $moduleName | Sort-Object Version -Descending)
+if ($mods.Count -eq 0) { throw "No $moduleName module found." }
+Import-Module $mods[0].Path -Force -ErrorAction Stop
+$cmd = Get-Command Invoke-AzStackHciArcInitialization -ErrorAction Stop
+[pscustomobject]@{
+    Node = $env:COMPUTERNAME
+    ModuleVersion = $mods[0].Version.ToString()
+    ModulePath = $mods[0].Path
+    SupportsTargetSolutionVersion = ($cmd.Parameters.Keys -contains 'TargetSolutionVersion')
+    SupportsArcGatewayID = ($cmd.Parameters.Keys -contains 'ArcGatewayID')
+}
+'@
+        $path = Join-Path $env:TEMP 'zcoffee-verify-arcinstaller.ps1'
+        Set-Content -LiteralPath $path -Value $script -Encoding UTF8
+        try {
+            & (Join-Path $PSHOME 'powershell.exe') -NoProfile -NonInteractive `
+                -ExecutionPolicy Bypass -File $path
+            if ($LASTEXITCODE -ne 0) { throw "Verification process exited with $LASTEXITCODE." }
+        }
+        finally {
+            Remove-Item -LiteralPath $path -Force -ErrorAction SilentlyContinue
+        }
+    }
+    $after | Format-List
+
+    if (-not $after.SupportsTargetSolutionVersion) {
+        throw 'Module copy completed, but TargetSolutionVersion is still unavailable.'
+    }
+    if (-not $after.SupportsArcGatewayID) {
+        throw 'Module copy completed, but ArcGatewayID is unavailable.'
+    }
+
+    Write-Host 'Arc installer upgrade completed successfully.' -ForegroundColor Green
+    $after
 }
 finally {
-    Remove-PSSession $s -ErrorAction SilentlyContinue
+    if ($source) {
+        Invoke-Command -Session $source -ScriptBlock {
+            Remove-Item -LiteralPath (Join-Path $env:TEMP 'zcoffee-arcinstaller.zip') `
+                -Force -ErrorAction SilentlyContinue
+        } -ErrorAction SilentlyContinue | Out-Null
+        Remove-PSSession $source -ErrorAction SilentlyContinue
+    }
+    if ($target) {
+        Remove-PSSession $target -ErrorAction SilentlyContinue
+    }
+    Remove-Item -LiteralPath $archiveLocal -Force -ErrorAction SilentlyContinue
 }
