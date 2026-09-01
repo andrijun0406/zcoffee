@@ -1,4 +1,4 @@
-﻿<#
+﻿﻿<#
 .SYNOPSIS
     Stage 4 - Register both nodes with Azure Arc (Arc-enabled servers) for Azure Local deployment.
 
@@ -168,9 +168,26 @@ $remoteArc = {
 
     if ($doRegister -and -not $o.AlreadyConnected -and $o.Errors.Count -eq 0) {
         try {
-            Import-Module AzsHci.ARCInstaller -ErrorAction Stop
-            $cmd = Get-Command Invoke-AzStackHciArcInitialization -ErrorAction Stop
-            $valid = $cmd.Parameters.Keys
+            function Get-ArcInitializationCommand {
+                Remove-Module AzsHci.ARCInstaller -Force -ErrorAction SilentlyContinue
+                $available = @(Get-Module -ListAvailable -Name AzsHci.ARCInstaller |
+                    Sort-Object Version -Descending)
+                if ($available.Count -eq 0) {
+                    throw 'AzsHci.ARCInstaller is not installed on this node.'
+                }
+                Import-Module $available[0].Path -Force -ErrorAction Stop
+                Get-Command Invoke-AzStackHciArcInitialization -ErrorAction Stop
+            }
+
+            $cmd = Get-ArcInitializationCommand
+            $valid = @($cmd.Parameters.Keys)
+
+            # TargetSolutionVersion is optional in the Microsoft registration contract.
+            # Older Dell/Azure Local installer modules may not expose it; do not fail
+            # registration or attempt an unbounded PSGallery upgrade in that case.
+            if ($targetSolutionVersion -and ($valid -notcontains 'TargetSolutionVersion')) {
+                $o.Warnings += 'Installed AzsHci.ARCInstaller does not support TargetSolutionVersion; omitting it and validating partner metadata after registration.'
+            }
 
             $arc = @{
                 SubscriptionID = $subId
@@ -184,10 +201,11 @@ $remoteArc = {
                 $arc['ArcGatewayID'] = $arcGatewayId
                 $o.Actions += "Arc Gateway ID supplied: $arcGatewayId"
             }
-            if ($targetSolutionVersion) {
-                if ($valid -notcontains 'TargetSolutionVersion') { throw 'Installed AzsHci.ARCInstaller does not support TargetSolutionVersion.' }
+            if ($targetSolutionVersion -and ($valid -contains 'TargetSolutionVersion')) {
                 $arc['TargetSolutionVersion'] = $targetSolutionVersion
                 $o.Actions += "Target solution version supplied: $targetSolutionVersion"
+            } elseif ($targetSolutionVersion) {
+                $o.Actions += 'Target solution version omitted because the installed initializer does not expose that parameter.'
             }
             if ($spAppId -and $spSecret -and ($valid -contains 'SpnCredential')) {
                 $spSec = ConvertTo-SecureString $spSecret -AsPlainText -Force
