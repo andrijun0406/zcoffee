@@ -1,4 +1,4 @@
-﻿﻿<#
+﻿<#
 .SYNOPSIS
     Stage 4 - Register both nodes with Azure Arc (Arc-enabled servers) for Azure Local deployment.
 
