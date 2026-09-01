@@ -1,4 +1,5 @@
-﻿[CmdletBinding()]
+﻿#requires -Version 5.1
+[CmdletBinding()]
 param(
     [Parameter(Mandatory = $true)]
     [string]$NodeIP,
@@ -23,82 +24,125 @@ if ($UseSSL) { $sessionArgs['UseSSL'] = $true }
 
 $s = New-PSSession @sessionArgs
 try {
-    Invoke-Command -Session $s -ScriptBlock {
-        [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
-        $moduleName = 'AzSHCI.ARCInstaller'
+    $result = Invoke-Command -Session $s -ScriptBlock {
+        Set-StrictMode -Version Latest
+        $ErrorActionPreference = 'Stop'
 
-        $before = @(Get-Module -ListAvailable -Name $moduleName |
-            Sort-Object Version -Descending)
-        $beforeCommand = $null
-        if ($before.Count -gt 0) {
-            $beforeCommand = Get-Command Invoke-AzStackHciArcInitialization `
-                -Module $moduleName -ErrorAction SilentlyContinue
+        $moduleName = 'AzSHCI.ARCInstaller'
+        $moduleRoot = Join-Path $env:ProgramFiles 'WindowsPowerShell\Modules'
+        $powershell = Join-Path $PSHOME 'powershell.exe'
+
+        function Get-ArcCapability {
+            $mods = @(Get-Module -ListAvailable -Name $moduleName |
+                Sort-Object Version -Descending)
+            if ($mods.Count -eq 0) { return $null }
+
+            $cmd = Get-Command Invoke-AzStackHciArcInitialization `
+                -ErrorAction SilentlyContinue
+            if (-not $cmd) {
+                Import-Module $mods[0].Path -Force -ErrorAction Stop
+                $cmd = Get-Command Invoke-AzStackHciArcInitialization `
+                    -ErrorAction SilentlyContinue
+            }
+            if (-not $cmd) { return $null }
+
+            [pscustomobject]@{
+                ModuleVersion                 = $mods[0].Version.ToString()
+                ModulePath                    = $mods[0].Path
+                SupportsTargetSolutionVersion = ($cmd.Parameters.Keys -contains 'TargetSolutionVersion')
+                SupportsArcGatewayID          = ($cmd.Parameters.Keys -contains 'ArcGatewayID')
+            }
         }
 
-        if ($beforeCommand -and
-            ($beforeCommand.Parameters.Keys -contains 'TargetSolutionVersion')) {
+        $before = Get-ArcCapability
+        if ($before -and $before.SupportsTargetSolutionVersion) {
             [pscustomobject]@{
                 Node                          = $env:COMPUTERNAME
                 Action                        = 'Already supported'
-                ModuleVersion                 = $before[0].Version.ToString()
-                ModulePath                    = $before[0].Path
-                SupportsTargetSolutionVersion = $true
-                SupportsArcGatewayID          = ($beforeCommand.Parameters.Keys -contains 'ArcGatewayID')
+                ModuleVersion                 = $before.ModuleVersion
+                ModulePath                    = $before.ModulePath
+                SupportsTargetSolutionVersion = $before.SupportsTargetSolutionVersion
+                SupportsArcGatewayID          = $before.SupportsArcGatewayID
             }
             return
         }
 
-        try {
-            Install-PackageProvider -Name NuGet -MinimumVersion 2.8.5.201 `
-                -Force -ErrorAction Stop | Out-Null
-        } catch {
-            Write-Warning "NuGet provider setup returned: $($_.Exception.Message)"
+        $bootstrap = Join-Path $env:TEMP 'zcoffee-install-arcinstaller.ps1'
+        @'
+[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+$ErrorActionPreference = 'Stop'
+$moduleName = 'AzSHCI.ARCInstaller'
+$moduleRoot = Join-Path $env:ProgramFiles 'WindowsPowerShell\Modules'
+
+try {
+    Install-PackageProvider -Name NuGet -MinimumVersion 2.8.5.201 `
+        -Force -ErrorAction Stop | Out-Null
+} catch {
+    # The provider may already be installed; Find/Save-Module gives the real error if not.
+}
+
+try {
+    Set-PSRepository -Name PSGallery -InstallationPolicy Trusted `
+        -ErrorAction Stop
+} catch {
+    # Continue; an existing repository policy is sufficient.
+}
+
+$latest = Find-Module -Name $moduleName -Repository PSGallery `
+    -ErrorAction Stop | Sort-Object Version -Descending | Select-Object -First 1
+if (-not $latest) { throw "No PSGallery package found for $moduleName." }
+
+New-Item -ItemType Directory -Path $moduleRoot -Force | Out-Null
+Save-Module -Name $moduleName `
+    -Repository PSGallery `
+    -RequiredVersion $latest.Version `
+    -Path $moduleRoot `
+    -Force `
+    -ErrorAction Stop
+
+Write-Output ("Saved {0} {1}" -f $moduleName, $latest.Version)
+'@ | Set-Content -LiteralPath $bootstrap -Encoding UTF8
+
+        $stdoutLog = Join-Path $env:TEMP 'zcoffee-install-arcinstaller.stdout.log'
+        $stderrLog = Join-Path $env:TEMP 'zcoffee-install-arcinstaller.stderr.log'
+        Remove-Item $stdoutLog, $stderrLog -Force -ErrorAction SilentlyContinue
+        $p = Start-Process -FilePath $powershell `
+            -ArgumentList @(
+                '-NoProfile',
+                '-NonInteractive',
+                '-ExecutionPolicy', 'Bypass',
+                '-File', $bootstrap
+            ) `
+            -Wait -PassThru -RedirectStandardOutput $stdoutLog -RedirectStandardError $stderrLog
+
+        if ($p.ExitCode -ne 0) {
+            $outDetail = if (Test-Path $stdoutLog) { Get-Content $stdoutLog -Raw } else { '' }
+            $errDetail = if (Test-Path $stderrLog) { Get-Content $stderrLog -Raw } else { '' }
+            throw "Clean module-save process failed with exit code $($p.ExitCode). $outDetail $errDetail"
         }
 
-        try {
-            Set-PSRepository -Name PSGallery -InstallationPolicy Trusted `
-                -ErrorAction Stop
-        } catch {
-            Write-Warning "Could not set PSGallery trust policy: $($_.Exception.Message)"
+        Remove-Item $bootstrap -Force -ErrorAction SilentlyContinue
+
+        # Load the highest available copy only after the child process exits.
+        Remove-Module $moduleName -Force -ErrorAction SilentlyContinue
+        $after = Get-ArcCapability
+        if (-not $after) {
+            throw "$moduleName was not discoverable after Save-Module."
         }
-
-        $available = @(Find-Module -Name $moduleName -Repository PSGallery `
-            -ErrorAction Stop)
-        if ($available.Count -eq 0) {
-            throw "No PSGallery module found for $moduleName."
-        }
-
-        $latest = $available | Sort-Object Version -Descending | Select-Object -First 1
-        Install-Module -Name $moduleName -Repository PSGallery `
-            -RequiredVersion $latest.Version -Force -AllowClobber `
-            -Scope AllUsers -ErrorAction Stop
-
-        $installed = @(Get-Module -ListAvailable -Name $moduleName |
-            Sort-Object Version -Descending)
-        if ($installed.Count -eq 0) {
-            throw "$moduleName was not found after installation."
-        }
-
-        $selected = $installed[0]
-        Import-Module $selected.Path -Force -ErrorAction Stop
-        $afterCommand = Get-Command Invoke-AzStackHciArcInitialization `
-            -Module $moduleName -ErrorAction Stop
-        $supportsTarget = ($afterCommand.Parameters.Keys -contains 'TargetSolutionVersion')
-        $supportsGateway = ($afterCommand.Parameters.Keys -contains 'ArcGatewayID')
-
-        if (-not $supportsTarget) {
-            throw "Installed $moduleName version $($selected.Version) still does not support TargetSolutionVersion."
+        if (-not $after.SupportsTargetSolutionVersion) {
+            throw "Latest installed $moduleName version $($after.ModuleVersion) still does not support TargetSolutionVersion."
         }
 
         [pscustomobject]@{
             Node                          = $env:COMPUTERNAME
-            Action                        = 'Upgraded'
-            ModuleVersion                 = $selected.Version.ToString()
-            ModulePath                    = $selected.Path
-            SupportsTargetSolutionVersion = $supportsTarget
-            SupportsArcGatewayID          = $supportsGateway
+            Action                        = 'Upgraded side-by-side'
+            ModuleVersion                 = $after.ModuleVersion
+            ModulePath                    = $after.ModulePath
+            SupportsTargetSolutionVersion = $after.SupportsTargetSolutionVersion
+            SupportsArcGatewayID          = $after.SupportsArcGatewayID
         }
     }
+    $result
 }
 finally {
     Remove-PSSession $s -ErrorAction SilentlyContinue
