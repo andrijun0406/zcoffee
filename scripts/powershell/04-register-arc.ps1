@@ -85,6 +85,7 @@ $UseArcGateway     = [bool](Resolve-Setting -Name 'UseArcGateway' -Bound $b -Cur
 $ArcGatewayName    = Resolve-Setting -Name 'ArcGatewayName' -Bound $b -Current $ArcGatewayName -ConfigKey 'ArcGatewayName' -Config $cfg
 $ArcGatewayID      = Resolve-Setting -Name 'ArcGatewayID' -Bound $b -Current $ArcGatewayID -ConfigKey 'ArcGatewayID' -Config $cfg
 $TargetSolutionVersion = Resolve-Setting -Name 'TargetSolutionVersion' -Bound $b -Current $TargetSolutionVersion -ConfigKey 'TargetSolutionVersion' -Config $cfg
+$AccountId = Resolve-Setting -Name 'AccountId' -Bound $b -Current $AccountId -ConfigKey 'AccountId' -Config $cfg
 
 if (-not $b.ContainsKey('NodeIPs')) {
     if ($cfg.ContainsKey('Nodes')) { $NodeIPs = @($cfg.Nodes | ForEach-Object { $_.HostIP }) }
@@ -124,7 +125,7 @@ $remoteArc = {
     $o = [ordered]@{
         Actions=@(); Warnings=@(); Errors=@(); AlreadyConnected=$false; ModulesOk=$false; Registered=$false
         GatewayId=$arcGatewayId; ArcStatus=$null; GatewayMode=$null; PartnerConfigured=$false
-        PartnerSolutionVersion=$null; ReadyForAzureLocal=$false
+        PartnerSolutionVersion=$null; TargetSolutionSupported=$false; ReadyForAzureLocal=$false
     }
     $agentExe = "$env:ProgramFiles\AzureConnectedMachineAgent\azcmagent.exe"
 
@@ -181,6 +182,7 @@ $remoteArc = {
 
             $cmd = Get-ArcInitializationCommand
             $valid = @($cmd.Parameters.Keys)
+            $o.TargetSolutionSupported = ($valid -contains 'TargetSolutionVersion')
 
             # TargetSolutionVersion is optional in the Microsoft registration contract.
             # Older Dell/Azure Local installer modules may not expose it; do not fail
@@ -219,7 +221,26 @@ $remoteArc = {
             foreach ($k in @($arc.Keys)) { if ($valid -notcontains $k) { $arc.Remove($k) } }
             $o.Actions += "Arc init params: $((@($arc.Keys | Sort-Object)) -join ', ')"
 
-            $null = Invoke-AzStackHciArcInitialization @arc -ErrorAction Stop *>&1
+            try {
+                $null = Invoke-AzStackHciArcInitialization @arc -ErrorAction Stop *>&1
+            } catch {
+                # Older 1.2408-era initializers can expose ArcGatewayID but still
+                # reject gateway registration with HTTP 400. If the first attempt
+                # did not leave the agent Connected, retry once without the gateway
+                # parameter and associate it through the REST settings endpoint.
+                $postFailureStatus = $null
+                try {
+                    $postFailureStatus = [string](((& $agentExe show -j 2>$null | Out-String) | ConvertFrom-Json).status)
+                } catch { }
+                if ($arcGatewayId -and $arc.ContainsKey('ArcGatewayID') -and $postFailureStatus -ne 'Connected') {
+                    $o.Warnings += 'Initializer rejected ArcGatewayID; retrying legacy registration without it, then associating the gateway through REST.'
+                    $arc.Remove('ArcGatewayID')
+                    $null = Invoke-AzStackHciArcInitialization @arc -ErrorAction Stop *>&1
+                    $o.Actions += 'Legacy Arc initialization completed without ArcGatewayID'
+                } else {
+                    throw
+                }
+            }
             $o.Registered = $true
             $o.Actions += 'Invoke-AzStackHciArcInitialization completed'
 
@@ -312,19 +333,33 @@ try {
         }
         $script:armToken = $tok
 
-        # AccountID resolution: explicit param > SP object-id lookup > signed-in user > context.
+        # AccountID must be the signed-in user's object ID or service-principal object ID.
+        # A certificate SP context commonly exposes its application ID as Account.Id;
+        # never use that value as AccountID for Arc initialization.
         $acctId = $null
         if ($script:AccountId) {
             $acctId = $script:AccountId
-            Write-Info 'Using explicit -AccountId (recommended for certificate SPs).'
+            Write-Info 'Using explicit -AccountId (object ID).'
+        } elseif ($script:ServicePrincipalId -and -not $script:ServicePrincipalSecret) {
+            try {
+                $spObject = Get-AzADServicePrincipal -ApplicationId $script:ServicePrincipalId -ErrorAction Stop
+                if ($spObject) { $acctId = $spObject.Id }
+            } catch {
+                throw 'Certificate-based service-principal authentication requires -AccountId set to the service-principal object ID.'
+            }
+        } elseif (-not $script:ServicePrincipalId) {
+            try {
+                $u = Get-AzADUser -SignedIn -ErrorAction SilentlyContinue
+                if ($u) { $acctId = $u.Id }
+            } catch { }
         }
-        if (-not $acctId -and $script:ServicePrincipalId) {
-            try { $acctId = (Get-AzADServicePrincipal -ApplicationId $script:ServicePrincipalId -ErrorAction SilentlyContinue).Id } catch { }
+        if (-not $acctId -and $script:ServicePrincipalId -and $script:ServicePrincipalSecret) {
+            # SpnCredential authentication does not require AccountID for the initializer.
+            $acctId = $script:azctx.Account.Id
         }
         if (-not $acctId) {
-            try { $u = Get-AzADUser -SignedIn -ErrorAction SilentlyContinue; if ($u) { $acctId = $u.Id } } catch { }
+            throw 'AccountId is required for Arc initialization. For a certificate service principal, pass its object ID, not its application ID.'
         }
-        if (-not $acctId) { $acctId = $script:azctx.Account.Id }
         $script:accountId = $acctId
         Write-Info "AccountID resolved to: $acctId"
 
@@ -547,8 +582,10 @@ try {
             if (-not $r) { throw "No Arc result object returned from $ip (scriptblock output was unexpected)." }
 
             $partnerMatches = $true
-            if ($script:TargetSolutionVersion) {
+            if ($script:TargetSolutionVersion -and $r.TargetSolutionSupported) {
                 $partnerMatches = $r.PartnerConfigured -and ($r.PartnerSolutionVersion -eq $script:TargetSolutionVersion)
+            } elseif ($script:TargetSolutionVersion -and -not $r.TargetSolutionSupported) {
+                Write-Warn "$ip initializer does not support TargetSolutionVersion; partner metadata is diagnostic only."
             }
             $gatewayMatches = $true
             if ($script:UseArcGateway) {
@@ -556,9 +593,10 @@ try {
             }
             $r.ReadyForAzureLocal = ($r.ArcStatus -eq 'Connected') -and $gatewayMatches -and $partnerMatches
 
-            if ($script:registerMode -and $script:ArcGatewayID -and $r.AlreadyConnected) {
-                # Use the Hybrid Compute settings REST endpoint. Some Az.ArcGateway
-                # versions generate an invalid singular machine resource path.
+            if ($script:registerMode -and $script:ArcGatewayID -and ($r.AlreadyConnected -or $r.Registered)) {
+                # Use the Hybrid Compute settings REST endpoint for both legacy
+                # fallback registrations and already-connected machines. Some
+                # Az.ArcGateway versions generate an invalid singular machine path.
                 $machineName = if ($nodeNameByIp.ContainsKey($ip)) { $nodeNameByIp[$ip] } else { $ip }
                 $escapedMachineName = [System.Uri]::EscapeDataString([string]$machineName)
                 $associationPath = "/subscriptions/$($script:SubscriptionId)/resourceGroups/$($script:ResourceGroupName)/providers/Microsoft.HybridCompute/machines/$escapedMachineName/providers/Microsoft.HybridCompute/settings/default?api-version=2024-07-31-preview"
@@ -600,10 +638,10 @@ try {
                 }
             } else {
                 if ($r.AlreadyConnected) { Write-Ok "$ip already Arc-connected (gateway association checked/updated)" }
-                elseif ($r.Registered)   { Write-Ok "$ip Arc initialization succeeded" }
+                elseif ($r.Registered)   { Write-Ok "$ip Arc initialization succeeded (gateway association checked/updated)" }
                 elseif ($r.Errors.Count -eq 0) { Write-Warn "$ip did not register and reported no error (investigate)" }
                 if (-not $r.ReadyForAzureLocal) {
-                    $script:arcFailures += "$ip : composite Azure Local readiness failed (ArcStatus=$($r.ArcStatus); GatewayMode=$($r.GatewayMode); Partner=$($r.PartnerSolutionVersion); expected TargetSolutionVersion=$script:TargetSolutionVersion)"
+                    $script:arcFailures += "$ip : Arc readiness failed (ArcStatus=$($r.ArcStatus); GatewayMode=$($r.GatewayMode); Partner=$($r.PartnerSolutionVersion); TargetSolutionSupported=$($r.TargetSolutionSupported))"
                     Write-Err "$ip is not Azure Local ready; do not proceed to Stage 5."
                 } else { Write-Ok "$ip Azure Local Arc prerequisites verified" }
             }
