@@ -1,0 +1,237 @@
+﻿<#
+.SYNOPSIS
+    Deploy the same unattended ISO to multiple iDRACs concurrently.
+
+.DESCRIPTION
+    Starts one concurrent range-capable serve-iso.ps1 process and invokes the existing
+    deploy-os.ps1 worker once per iDRAC in an in-process runspace pool. The SecureString
+    iDRAC password never appears on a child-process command line.
+
+    The HTTP server remains alive for ServerLifetimeMinutes after the workers finish so
+    the nodes can continue reading the ISO during Windows Setup. Do not use -NoWait for
+    an unattended installation unless the ISO is hosted elsewhere.
+#>
+[CmdletBinding()]
+param(
+    [string]$ISOFile,
+    [string]$HttpHost,
+    [string]$HttpBind = '0.0.0.0',
+    [ValidateRange(1,65535)]
+    [int]$HttpPort,
+    [string]$iDRACUser,
+    [SecureString]$iDRACPassword,
+    [string]$RACADMPath = 'racadm',
+    [switch]$StartInstallation,
+    [switch]$NoCertWarn,
+    [int]$ServerLifetimeMinutes = 240,
+    [switch]$NoWait,
+    [switch]$UseGui,
+    [string[]]$iDRACIPs
+)
+
+Set-StrictMode -Version Latest
+$ErrorActionPreference = 'Stop'
+. (Join-Path $PSScriptRoot 'ui-common.ps1')
+
+$cfg = Import-LabConfig
+$b = $PSBoundParameters
+
+$iDRACUser = Resolve-Setting -Name 'iDRACUser' -Bound $b -Current $iDRACUser -ConfigKey 'iDRACUser' -Config $cfg
+if (-not $iDRACUser) { $iDRACUser = 'root' }
+
+$HttpPort = Resolve-Setting -Name 'HttpPort' -Bound $b -Current $HttpPort -ConfigKey 'HttpPort' -Config $cfg
+if (-not $HttpPort) { $HttpPort = 8080 }
+
+if (-not $b.ContainsKey('iDRACIPs')) {
+    if ($cfg.ContainsKey('Nodes')) {
+        $iDRACIPs = @($cfg.Nodes | ForEach-Object { $_.iDRAC })
+    } else {
+        $iDRACIPs = @('10.8.230.84','10.8.230.86')
+    }
+}
+if ($iDRACIPs.Count -lt 2) {
+    throw 'Provide at least two iDRAC IPs for parallel deployment.'
+}
+
+if (-not $ISOFile) {
+    throw '-ISOFile is required. Provide the prepared unattended ISO path.'
+}
+$ISOFile = (Resolve-Path -LiteralPath $ISOFile -ErrorAction Stop).Path
+if (-not (Test-Path -LiteralPath $ISOFile -PathType Leaf)) {
+    throw "ISO file not found: $ISOFile"
+}
+
+if (-not $HttpHost) {
+    $HttpHost = Get-NetIPAddress -AddressFamily IPv4 -ErrorAction Stop |
+        Where-Object {
+            $_.IPAddress -like '10.8.230.*' -and
+            $_.IPAddress -notlike '127.*' -and
+            $_.IPAddress -notlike '169.254.*'
+        } |
+        Select-Object -First 1 -ExpandProperty IPAddress
+}
+if (-not $HttpHost) {
+    throw 'Unable to determine a reachable 10.8.230.x HTTP host. Supply -HttpHost.'
+}
+
+if (-not $b.ContainsKey('iDRACPassword') -or $null -eq $iDRACPassword) {
+    $iDRACPassword = Read-Host -Prompt "Enter the iDRAC password for '$iDRACUser'" -AsSecureString
+}
+
+$serveScript = Join-Path $PSScriptRoot 'serve-iso.ps1'
+$worker = Join-Path $PSScriptRoot 'deploy-os.ps1'
+if (-not (Test-Path -LiteralPath $serveScript -PathType Leaf)) { throw "Missing serve-iso.ps1: $serveScript" }
+if (-not (Test-Path -LiteralPath $worker -PathType Leaf)) { throw "Missing deploy-os.ps1: $worker" }
+
+$isoDir = Split-Path -LiteralPath $ISOFile -Parent
+$isoName = Split-Path -LiteralPath $ISOFile -Leaf
+$prefixHost = if ($HttpBind -and $HttpBind -notin @('0.0.0.0','+')) { $HttpBind } else { '+' }
+$prefix = "http://$prefixHost`:$HttpPort/"
+$isoUrl = "http://$HttpHost`:$HttpPort/$([Uri]::EscapeDataString($isoName))"
+
+$psExe = if ($PSVersionTable.PSEdition -eq 'Core') {
+    Join-Path $PSHOME 'pwsh.exe'
+} else {
+    Join-Path $PSHOME 'powershell.exe'
+}
+if (-not (Test-Path -LiteralPath $psExe)) { $psExe = 'powershell.exe' }
+
+$serverProcess = $null
+$runspacePool = $null
+$jobs = @()
+$workerErrors = New-Object System.Collections.Generic.List[string]
+$serverStartedAt = Get-Date
+
+Initialize-Ui -StageName '01-deploy-os-parallel' -TotalSteps 4 -UseGui:$UseGui
+
+try {
+    Invoke-Step 'Verify Administrator privileges' {
+        $id = [Security.Principal.WindowsIdentity]::GetCurrent()
+        $principal = [Security.Principal.WindowsPrincipal]::new($id)
+        if (-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
+            throw 'Administrator privileges are required.'
+        }
+    }
+
+    Invoke-Step 'Start one concurrent ISO HTTP server' {
+        $errFile = Join-Path $env:TEMP "zcoffee-iso-parallel-$PID.err"
+        $outFile = Join-Path $env:TEMP "zcoffee-iso-parallel-$PID.out"
+        $serverProcess = Start-Process -FilePath $psExe `
+            -ArgumentList @(
+                '-NoProfile','-ExecutionPolicy','Bypass','-File',$serveScript,
+                '-Prefix',$prefix,'-Directory',$isoDir
+            ) `
+            -PassThru -WindowStyle Minimized `
+            -RedirectStandardError $errFile -RedirectStandardOutput $outFile
+
+        Start-Sleep -Seconds 3
+        if ($serverProcess.HasExited) {
+            $detail = if (Test-Path $errFile) { Get-Content $errFile -Raw } else { '' }
+            throw "ISO HTTP server exited unexpectedly: $detail"
+        }
+        if (-not (Test-NetConnection -ComputerName $HttpHost -Port $HttpPort `
+            -InformationLevel Quiet -WarningAction SilentlyContinue)) {
+            throw "ISO server is not reachable at $HttpHost`:$HttpPort"
+        }
+        $null = Invoke-WebRequest -Uri $isoUrl -Method Head -TimeoutSec 15 -UseBasicParsing
+        Write-Ok "Serving $isoName for $($iDRACIPs.Count) concurrent iDRAC workers at $isoUrl"
+    }
+
+    Invoke-Step 'Start concurrent iDRAC OS workers' {
+        $runspacePool = [runspacefactory]::CreateRunspacePool(1, $iDRACIPs.Count)
+        $runspacePool.Open()
+
+        foreach ($node in $iDRACIPs) {
+            $ps = [powershell]::Create()
+            $ps.RunspacePool = $runspacePool
+            [void]$ps.AddScript({
+                param($workerPath, $target, $user, $password, $url, $racadm, $start, $noCert)
+                & $workerPath `
+                    -NodeIP $target `
+                    -iDRACUser $user `
+                    -iDRACPassword $password `
+                    -ISOUrl $url `
+                    -RACADMPath $racadm `
+                    -StartInstallation:$start `
+                    -NoCertWarn:$noCert
+                if (-not $?) {
+                    throw "deploy-os.ps1 failed for $target"
+                }
+            }).AddArgument($worker).AddArgument($node).AddArgument($iDRACUser).AddArgument($iDRACPassword).AddArgument($isoUrl).AddArgument($RACADMPath).AddArgument([bool]$StartInstallation).AddArgument([bool]$NoCertWarn)
+
+            $jobs += [pscustomobject]@{
+                Node = $node
+                PowerShell = $ps
+                Handle = $ps.BeginInvoke()
+            }
+            Write-Info "Started worker for iDRAC $node"
+        }
+
+        while (@($jobs | Where-Object { -not $_.Handle.IsCompleted }).Count -gt 0) {
+            foreach ($job in @($jobs | Where-Object { $_.Handle.IsCompleted -and -not $_.PSObject.Properties['Collected'] })) {
+                try {
+                    $output = $job.PowerShell.EndInvoke($job.Handle)
+                    foreach ($line in @($output)) { Write-Host $line }
+                    $job | Add-Member -NotePropertyName Collected -NotePropertyValue $true
+                    Write-Ok "Worker completed: $($job.Node)"
+                }
+                catch {
+                    $workerErrors.Add("$($job.Node): $($_.Exception.Message)")
+                    $job | Add-Member -NotePropertyName Collected -NotePropertyValue $true
+                    Write-Err "Worker failed: $($job.Node) - $($_.Exception.Message)"
+                }
+            }
+            if ((Get-Date) -gt $serverStartedAt.AddMinutes($ServerLifetimeMinutes)) {
+                throw "Worker timeout exceeded $ServerLifetimeMinutes minute(s)."
+            }
+            Start-Sleep -Seconds 2
+        }
+        foreach ($job in $jobs) {
+            if (-not $job.PSObject.Properties['Collected']) {
+                try {
+                    $output = $job.PowerShell.EndInvoke($job.Handle)
+                    foreach ($line in @($output)) { Write-Host $line }
+                }
+                catch { $workerErrors.Add("$($job.Node): $($_.Exception.Message)") }
+            }
+        }
+        if ($workerErrors.Count -gt 0) {
+            throw "One or more OS workers failed: $($workerErrors -join ' | ')"
+        }
+    }
+
+    Invoke-Step 'Keep ISO server alive for Windows Setup' {
+        if (-not $StartInstallation) {
+            Write-Warn 'StartInstallation was not supplied; workers mounted media only.'
+            return
+        }
+        if ($NoWait) {
+            Write-Warn 'NoWait supplied; stopping the server now may interrupt installation.'
+            return
+        }
+        Write-Info "Keeping the single ISO server alive for up to $ServerLifetimeMinutes minute(s)."
+        Write-Info 'Leave this window running until both nodes finish Windows Setup and return WinRM.'
+        while ((Get-Date) -lt $serverStartedAt.AddMinutes($ServerLifetimeMinutes)) {
+            if ($serverProcess.HasExited) { throw 'ISO server exited during Windows Setup.' }
+            Start-Sleep -Seconds 30
+        }
+        Write-Warn 'Server lifetime reached. Confirm both nodes completed Setup before continuing.'
+    }
+
+    Complete-Ui -FinalMessage 'Parallel OS deployment launcher finished.'
+}
+catch {
+    Write-Err $_.Exception.Message
+    Complete-Ui -Failed -FinalMessage 'Parallel OS deployment launcher failed.'
+    throw
+}
+finally {
+    foreach ($job in @($jobs)) {
+        try { $job.PowerShell.Dispose() } catch { }
+    }
+    if ($runspacePool) { try { $runspacePool.Close(); $runspacePool.Dispose() } catch { } }
+    if ($serverProcess -and -not $serverProcess.HasExited) {
+        Stop-Process -Id $serverProcess.Id -Force -ErrorAction SilentlyContinue
+        Write-Info 'ISO HTTP server stopped.'
+    }
+}
