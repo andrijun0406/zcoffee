@@ -119,13 +119,17 @@ if (-not (Test-Path -LiteralPath $psExe)) { $psExe = 'powershell.exe' }
         $errFile = Join-Path $env:TEMP "zcoffee-iso-parallel-$PID.err"
         $outFile = Join-Path $env:TEMP "zcoffee-iso-parallel-$PID.out"
         Write-Info "ISO server diagnostics: $errFile"
+        # Do not combine -WindowStyle with standard-stream redirection here.
+        # Windows PowerShell 5.1 resolves those switches to incompatible
+        # Start-Process parameter sets.
         $serverProcess = Start-Process -FilePath $psExe `
             -ArgumentList @(
                 '-NoProfile','-ExecutionPolicy','Bypass','-File',$serveScript,
                 '-Prefix',$prefix,'-Directory',$isoDir
             ) `
-            -PassThru -WindowStyle Minimized `
-            -RedirectStandardError $errFile -RedirectStandardOutput $outFile
+            -PassThru `
+            -RedirectStandardError $errFile `
+            -RedirectStandardOutput $outFile
 
         Start-Sleep -Seconds 3
         if ($serverProcess.HasExited) {
