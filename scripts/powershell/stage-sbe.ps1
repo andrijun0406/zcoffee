@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
     Stage a validated SBE bundle to Azure Local nodes.
 #>
@@ -119,7 +119,7 @@ try {
                         $source = [string]$file.FullName
                         if ([string]::IsNullOrWhiteSpace($source) -or -not (Test-Path -LiteralPath $source -PathType Leaf)) { throw ('Missing source file: ' + $source) }
                         Write-Info ($ip + ': copying ' + $file.Name + ' (' + $file.Length + ' bytes)')
-                        Copy-Item -LiteralPath $source -Destination $remoteStage -ToSession $session -Force -ErrorAction Stop
+                        Copy-Item -Path $source -Destination $remoteStage -ToSession $session -Force -ErrorAction Stop
                     }
                     Invoke-Command -Session $session -ScriptBlock {
                         param($stage,$dest,$replace)
