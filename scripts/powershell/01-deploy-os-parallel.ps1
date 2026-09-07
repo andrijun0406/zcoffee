@@ -34,13 +34,14 @@ $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'ui-common.ps1')
 
 # Initialize runtime state before any operation that can fail so early errors are reportable.
-$serverProcess = $null
-$serverOwned = $false
+$script:serverProcess = $null
+# Shared across Invoke-Step scriptblocks; HTTP health is authoritative.
+$script:serverOwned = $false
 $runspacePool = $null
 $jobs = New-Object System.Collections.ArrayList
 if ($jobs -isnot [System.Collections.ArrayList]) { throw 'Failed to initialize parallel worker collection.' }
 $workerErrors = New-Object System.Collections.Generic.List[string]
-$serverStartedAt = Get-Date
+$script:serverStartedAt = Get-Date
 
 function Get-IsoHttpHealth {
     param(
@@ -198,7 +199,7 @@ if (-not (Test-Path -LiteralPath $psExe)) { $psExe = 'powershell.exe' }
     Invoke-Step 'Start or reuse one concurrent ISO HTTP server' {
         $errFile = Join-Path $env:TEMP "zcoffee-iso-parallel-$PID.err"
         $outFile = Join-Path $env:TEMP "zcoffee-iso-parallel-$PID.out"
-        $serverStartedAt = Get-Date
+        $script:serverStartedAt = Get-Date
         $serverHealthy = $false
 
         # HTTP service health is authoritative. A prior launcher may have exited
@@ -207,7 +208,7 @@ if (-not (Test-Path -LiteralPath $psExe)) { $psExe = 'powershell.exe' }
         $health = Get-IsoHttpHealth -Url $isoUrl -TimeoutMilliseconds 5000
         if ($health.Healthy) {
             $serverHealthy = $true
-            $serverOwned = $false
+            $script:serverOwned = $false
             Write-Warn "Reusing healthy ISO HTTP service already listening at $isoUrl."
         }
         else {
@@ -220,13 +221,13 @@ if (-not (Test-Path -LiteralPath $psExe)) { $psExe = 'powershell.exe' }
 
             # These redirect switches are compatible with Windows PowerShell 5.1
             # when -WindowStyle is omitted. They are diagnostics only.
-            $serverProcess = Start-Process -FilePath $psExe `
+            $script:serverProcess = Start-Process -FilePath $psExe `
                 -ArgumentList $serverArgs `
                 -WorkingDirectory $isoDir `
                 -RedirectStandardOutput $outFile `
                 -RedirectStandardError $errFile `
                 -PassThru
-            $serverOwned = $true
+            $script:serverOwned = $true
 
             for ($probe = 1; $probe -le 15; $probe++) {
                 Start-Sleep -Seconds 1
@@ -244,8 +245,8 @@ if (-not (Test-Path -LiteralPath $psExe)) { $psExe = 'powershell.exe' }
                 $outText = if (Test-Path -LiteralPath $outFile) {
                     Get-Content -LiteralPath $outFile -Raw
                 } else { '' }
-                $exitText = if ($serverProcess.HasExited) {
-                    [string]$serverProcess.ExitCode
+                $exitText = if ($script:serverProcess.HasExited) {
+                    [string]$script:serverProcess.ExitCode
                 } else { 'running' }
                 throw @"
 ISO HTTP service failed health check at $isoUrl.
@@ -326,7 +327,7 @@ $outText
                     Write-Err "Worker failed: $($job.Node) - $($_.Exception.Message)"
                 }
             }
-            if ((Get-Date) -gt $serverStartedAt.AddMinutes($ServerLifetimeMinutes)) {
+            if ((Get-Date) -gt $script:serverStartedAt.AddMinutes($ServerLifetimeMinutes)) {
                 throw "Worker timeout exceeded $ServerLifetimeMinutes minute(s)."
             }
             Start-Sleep -Seconds 2
@@ -356,15 +357,15 @@ $outText
         }
         Write-Info "Keeping the single ISO server alive for up to $ServerLifetimeMinutes minute(s)."
         Write-Info 'Leave this window running until both nodes finish Windows Setup and return WinRM.'
-        while ((Get-Date) -lt $serverStartedAt.AddMinutes($ServerLifetimeMinutes)) {
+        while ((Get-Date) -lt $script:serverStartedAt.AddMinutes($ServerLifetimeMinutes)) {
             $health = Get-IsoHttpHealth -Url $isoUrl -TimeoutMilliseconds 5000
             if (-not $health.Healthy) {
                 throw "ISO HTTP service health failed during Windows Setup at $isoUrl. $($health.Error)"
             }
-            if ($serverProcess -and $serverProcess.HasExited) {
+            if ($script:serverProcess -and $script:serverProcess.HasExited) {
                 Write-Warn "ISO server process is no longer running, but the HTTP service remains healthy."
-                $serverProcess = $null
-                $serverOwned = $false
+                $script:serverProcess = $null
+                $script:serverOwned = $false
             }
             Start-Sleep -Seconds 30
         }
@@ -397,8 +398,8 @@ finally {
         try { $job.PowerShell.Dispose() } catch { }
     }
     if ($runspacePool) { try { $runspacePool.Close(); $runspacePool.Dispose() } catch { } }
-    if ($serverOwned -and $serverProcess -and -not $serverProcess.HasExited) {
-        Stop-Process -Id $serverProcess.Id -Force -ErrorAction SilentlyContinue
+    if ($script:serverOwned -and $script:serverProcess -and -not $script:serverProcess.HasExited) {
+        Stop-Process -Id $script:serverProcess.Id -Force -ErrorAction SilentlyContinue
         Write-Info 'ISO HTTP server stopped.'
     }
 }

@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
     Slipstreams an unattended Autounattend.xml INTO the Dell golden image ISO, producing a new
     single bootable ISO for fully-scripted Azure Local OS install over ONE iDRAC RFS mount.
@@ -190,6 +190,11 @@ echo [%DATE% %TIME%] === DISK INVENTORY (wmic diskdrive get index,model,size,int
 wmic diskdrive get index,model,size,interfacetype >> "%LOG%" 2>&1
 echo [%DATE% %TIME%] === END DISK INVENTORY ===>> "%LOG%"
 
+rem --- Forensic: capture pre-clean logical volumes before touching any disk ---
+echo [%DATE% %TIME%] === PRE-CLEAN LOGICAL INVENTORY ===>> "%LOG%"
+wmic logicaldisk get caption,freespace,size >> "%LOG%" 2>&1
+echo [%DATE% %TIME%] === END PRE-CLEAN LOGICAL INVENTORY ===>> "%LOG%"
+
 rem --- Detect the BOSS boot VD by exact model. Take the FIRST valid index, then stop. ---
 rem WinPE has no findstr. Proven on R650: exactly one 'DELLBOSS VD' (index 8). Candidate
 rem counting misfired on real WMIC output (trailing CR/blank tokenized as a 2nd hit), so we
@@ -209,8 +214,13 @@ for /f "skip=1 tokens=1" %%i in ('wmic diskdrive where "model='DELLBOSS VD'" get
 echo [%DATE% %TIME%] FINAL_BOSS_INDEX=[!BOSS_INDEX!]>> "%LOG%"
 
 if not defined BOSS_INDEX (
-    echo [%DATE% %TIME%] RESULT: no DELLBOSS VD detected. Setup will continue to manual disk selection.>> "%LOG%"
-    endlocal ^& exit /b 0
+    echo [%DATE% %TIME%] FAILURE: no DELLBOSS VD detected. Setup is stopping instead of falling through to manual/upgrade selection.>> "%LOG%"
+    if exist W:\Windows\. (
+        if not exist W:\Windows\Temp mkdir W:\Windows\Temp >nul 2>&1
+        copy /Y "%LOG%" W:\Windows\Tempootdisk-select.log >nul 2>&1
+        copy /Y "%LOG%" W:ootdisk-select.log >nul 2>&1
+    )
+    endlocal ^& exit /b 20
 )
 
 rem --- Log + verify the exact device before touching it ---
@@ -237,7 +247,22 @@ type "%DP%" >> "%LOG%" 2>&1
 echo [%DATE% %TIME%] SELECTED DISK NUMBER: !BOSS_INDEX!>> "%LOG%"
 echo [%DATE% %TIME%] Running diskpart to clean + partition the BOSS disk...>> "%LOG%"
 diskpart /s "%DP%" >> "%LOG%" 2>&1
-echo [%DATE% %TIME%] diskpart exit code: !ERRORLEVEL!>> "%LOG%"
+set "DP_RC=!ERRORLEVEL!"
+echo [%DATE% %TIME%] diskpart exit code: !DP_RC!>> "%LOG%"
+if not "!DP_RC!"=="0" (
+    echo [%DATE% %TIME%] FAILURE: diskpart did not complete successfully. Setup is stopping.>> "%LOG%"
+    if exist W:\Windows\. (
+        if not exist W:\Windows\Temp mkdir W:\Windows\Temp >nul 2>&1
+        copy /Y "%LOG%" W:\Windows\Tempootdisk-select.log >nul 2>&1
+        copy /Y "%LOG%" W:ootdisk-select.log >nul 2>&1
+    )
+    endlocal ^& exit /b 21
+)
+
+rem --- Forensic: capture post-clean logical volumes ---
+echo [%DATE% %TIME%] === POST-CLEAN LOGICAL INVENTORY ===>> "%LOG%"
+wmic logicaldisk get caption,freespace,size >> "%LOG%" 2>&1
+echo [%DATE% %TIME%] === END POST-CLEAN LOGICAL INVENTORY ===>> "%LOG%"
 
 rem --- Validate: capture list disk / list volume after partitioning ---
 set "VF=X:\verify.txt"
@@ -248,6 +273,11 @@ echo [%DATE% %TIME%] === POST-DISKPART INVENTORY (list disk / list volume) ===>>
 diskpart /s "%VF%" >> "%LOG%" 2>&1
 echo [%DATE% %TIME%] === END POST-DISKPART INVENTORY ===>> "%LOG%"
 echo [%DATE% %TIME%] Boot disk prepared on disk !BOSS_INDEX! (EFI=S: MSR Windows=W:). Done.>> "%LOG%"
+if exist W:\Windows\. (
+    if not exist W:\Windows\Temp mkdir W:\Windows\Temp >nul 2>&1
+    copy /Y "%LOG%" W:\Windows\Tempootdisk-select.log >nul 2>&1
+    copy /Y "%LOG%" W:ootdisk-select.log >nul 2>&1
+)
 endlocal ^& exit /b 0
 "@
     # WinPE on Azure Local media has NO powershell.exe, so the disk logic is a cmd/wmic/diskpart
