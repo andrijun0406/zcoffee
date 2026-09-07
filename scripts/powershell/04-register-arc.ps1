@@ -20,7 +20,9 @@
     explicitly (Stage 0 prints it) to make this deterministic.
 
 .NOTES
-    Arc-init failure is FATAL (throws), not a swallowed warning. Args are built from the cmdlet's
+    Arc initialization is evaluated by postconditions. Some AzSHCI.ARCInstaller builds can
+    create/connect the Arc machine and then emit an internal Trace-Execution error; that is
+    reported as a warning when azcmagent status is Connected. Args are built from the cmdlet's
     ACTUAL parameters on the node so this survives installer version changes.
 #>
 [CmdletBinding(SupportsShouldProcess = $true)]
@@ -129,28 +131,82 @@ $remoteArc = {
     }
     $agentExe = "$env:ProgramFiles\AzureConnectedMachineAgent\azcmagent.exe"
 
-    try {
-        if (Test-Path $agentExe) {
-            $agentJson = (& $agentExe show -j 2>$null | Out-String) | ConvertFrom-Json
-            $o.ArcStatus = [string]$agentJson.status
-            if ($o.ArcStatus -eq 'Connected') {
-                $o.AlreadyConnected = $true
-                $o.Actions += 'azcmagent status is Connected'
-            }
-            $modeText = (& $agentExe config get connection.type 2>&1 | Out-String).Trim()
-            $o.GatewayMode = $modeText
-            if ($modeText) { $o.Actions += "Arc connection.type: $modeText" }
-
-            $partnerText = (& $agentExe partnerconfig get SolutionVersion --partner AzureLocal 2>&1 | Out-String).Trim()
-            if ($partnerText -match '(?m)^\s*\d+\.\d+\.\d+\s*$') {
-                $o.PartnerConfigured = $true
-                $o.PartnerSolutionVersion = (($partnerText -split '\r?\n' | Where-Object { $_ -match '^\s*\d+\.\d+\.\d+\s*$' } | Select-Object -First 1).Trim())
-                $o.Actions += "AzureLocal partner SolutionVersion: $($o.PartnerSolutionVersion)"
-            } else {
-                $o.Warnings += 'AzureLocal partner metadata is missing or unavailable.'
-            }
+    function Get-ArcNodeState {
+        $state = [ordered]@{
+            Status                 = $null
+            Mode                   = $null
+            PartnerConfigured      = $false
+            PartnerSolutionVersion = $null
         }
-    } catch { $o.Warnings += 'Unable to read azcmagent JSON status.' }
+
+        if (-not (Test-Path -Path $agentExe)) {
+            return [pscustomobject]$state
+        }
+
+        try {
+            $j = ((& $agentExe show -j 2>$null | Out-String) | ConvertFrom-Json)
+            $state.Status = [string]$j.status
+        } catch { }
+
+        try {
+            $state.Mode = (& $agentExe config get connection.type 2>&1 | Out-String).Trim()
+        } catch { }
+
+        try {
+            $partnerText = (& $agentExe partnerconfig get SolutionVersion --partner AzureLocal 2>&1 | Out-String).Trim()
+            $versionLine = @($partnerText -split '\r?\n' |
+                Where-Object { $_ -match '^\s*\d+\.\d+\.\d+\s*$' } |
+                Select-Object -First 1)
+            if ($versionLine.Count -gt 0) {
+                $state.PartnerConfigured = $true
+                $state.PartnerSolutionVersion = ([string]$versionLine[0]).Trim()
+            }
+        } catch { }
+
+        [pscustomobject]$state
+    }
+
+    function Wait-ArcConnected {
+        param([int]$TimeoutSeconds = 120)
+
+        $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
+        do {
+            $state = Get-ArcNodeState
+            if ($state.Status -eq 'Connected') {
+                return $state
+            }
+            Start-Sleep -Seconds 5
+        } while ((Get-Date) -lt $deadline)
+
+        Get-ArcNodeState
+    }
+
+    function Apply-ArcNodeState {
+        param($State)
+
+        if ($null -eq $State) { return }
+        $o.ArcStatus = [string]$State.Status
+        $o.GatewayMode = [string]$State.Mode
+        $o.PartnerConfigured = [bool]$State.PartnerConfigured
+        $o.PartnerSolutionVersion = $State.PartnerSolutionVersion
+    }
+
+    try {
+        $initialState = Get-ArcNodeState
+        Apply-ArcNodeState $initialState
+        if ($o.ArcStatus -eq 'Connected') {
+            $o.AlreadyConnected = $true
+            $o.Actions += 'azcmagent status is Connected'
+        }
+        if ($o.GatewayMode) { $o.Actions += "Arc connection.type: $($o.GatewayMode)" }
+        if ($o.PartnerConfigured) {
+            $o.Actions += "AzureLocal partner SolutionVersion: $($o.PartnerSolutionVersion)"
+        } else {
+            $o.Warnings += 'AzureLocal partner metadata is missing or unavailable.'
+        }
+    } catch {
+        $o.Warnings += 'Unable to read azcmagent state.'
+    }
 
     try {
         foreach ($m in @('Az.Accounts','Az.Resources','AzsHci.ARCInstaller')) {
@@ -221,46 +277,62 @@ $remoteArc = {
             foreach ($k in @($arc.Keys)) { if ($valid -notcontains $k) { $arc.Remove($k) } }
             $o.Actions += "Arc init params: $((@($arc.Keys | Sort-Object)) -join ', ')"
 
+            $initializerSucceeded = $false
+            $initializerError = $null
+
             try {
                 $null = Invoke-AzStackHciArcInitialization @arc -ErrorAction Stop *>&1
+                $initializerSucceeded = $true
+                $o.Actions += 'Invoke-AzStackHciArcInitialization completed'
             } catch {
-                # Older 1.2408-era initializers can expose ArcGatewayID but still
-                # reject gateway registration with HTTP 400. If the first attempt
-                # did not leave the agent Connected, retry once without the gateway
-                # parameter and associate it through the REST settings endpoint.
-                $postFailureStatus = $null
-                try {
-                    $postFailureStatus = [string](((& $agentExe show -j 2>$null | Out-String) | ConvertFrom-Json).status)
-                } catch { }
-                if ($arcGatewayId -and $arc.ContainsKey('ArcGatewayID') -and $postFailureStatus -ne 'Connected') {
-                    $o.Warnings += 'Initializer rejected ArcGatewayID; retrying legacy registration without it, then associating the gateway through REST.'
+                $initializerError = $_.Exception.Message
+
+                # Some AzSHCI.ARCInstaller builds create the Arc resource and connect
+                # azcmagent before throwing an internal Trace-Execution error. Treat
+                # Connected as the authoritative postcondition instead of retrying or
+                # reporting a false registration failure.
+                $postFailureState = Wait-ArcConnected -TimeoutSeconds 120
+                Apply-ArcNodeState $postFailureState
+
+                if ($postFailureState.Status -eq 'Connected') {
+                    $initializerSucceeded = $true
+                    $o.Warnings += "Arc initializer emitted an error after onboarding; postcondition Connected verified: $initializerError"
+                    $o.Actions += 'Postcondition verified: azcmagent status is Connected; initialization treated as successful'
+                } elseif ($arcGatewayId -and $arc.ContainsKey('ArcGatewayID')) {
+                    $o.Warnings += "Initializer did not connect with ArcGatewayID; retrying legacy registration without it: $initializerError"
                     $arc.Remove('ArcGatewayID')
-                    $null = Invoke-AzStackHciArcInitialization @arc -ErrorAction Stop *>&1
-                    $o.Actions += 'Legacy Arc initialization completed without ArcGatewayID'
+
+                    try {
+                        $null = Invoke-AzStackHciArcInitialization @arc -ErrorAction Stop *>&1
+                        $initializerSucceeded = $true
+                        $o.Actions += 'Legacy Arc initialization completed without ArcGatewayID'
+                    } catch {
+                        $legacyError = $_.Exception.Message
+                        $legacyState = Wait-ArcConnected -TimeoutSeconds 120
+                        Apply-ArcNodeState $legacyState
+                        if ($legacyState.Status -eq 'Connected') {
+                            $initializerSucceeded = $true
+                            $o.Warnings += "Legacy initializer emitted an error after onboarding; postcondition Connected verified: $legacyError"
+                            $o.Actions += 'Legacy postcondition verified: azcmagent status is Connected'
+                        } else {
+                            $o.Errors += "Arc init FAILED: $legacyError"
+                        }
+                    }
                 } else {
-                    throw
+                    $o.Errors += "Arc init FAILED: $initializerError"
                 }
             }
-            $o.Registered = $true
-            $o.Actions += 'Invoke-AzStackHciArcInitialization completed'
 
-            # Refresh all readiness signals after initialization. A pre-registration
-            # probe is expected to show no AzureLocal partner; the post-init probe is
-            # the authoritative result used by the Stage 5 gate.
-            try {
-                $agentJson = (& $agentExe show -j 2>$null | Out-String) | ConvertFrom-Json
-                $o.ArcStatus = [string]$agentJson.status
-                $o.GatewayMode = (& $agentExe config get connection.type 2>&1 | Out-String).Trim()
-                $partnerText = (& $agentExe partnerconfig get SolutionVersion --partner AzureLocal 2>&1 | Out-String).Trim()
-                if ($partnerText -match '(?m)^\s*\d+\.\d+\.\d+\s*$') {
-                    $o.PartnerConfigured = $true
-                    $o.PartnerSolutionVersion = (($partnerText -split '\r?\n' | Where-Object { $_ -match '^\s*\d+\.\d+\.\d+\s*$' } | Select-Object -First 1).Trim())
-                } else {
-                    $o.Warnings = @($o.Warnings | Where-Object { $_ -ne 'AzureLocal partner metadata is missing or unavailable.' })
+            if ($initializerSucceeded) {
+                $o.Registered = $true
+                $finalState = Get-ArcNodeState
+                Apply-ArcNodeState $finalState
+                if ($o.ArcStatus -ne 'Connected') {
+                    $o.Errors += "Arc initialization returned but azcmagent status is '$($o.ArcStatus)', expected Connected."
                 }
-            } catch { $o.Errors += "Post-registration readiness probe failed: $($_.Exception.Message)" }
+            }
         } catch {
-            $o.Errors += "Arc init FAILED: $($_.Exception.Message)"
+            $o.Errors += "Arc initialization handling FAILED: $($_.Exception.Message)"
         }
     }
 
@@ -675,7 +747,7 @@ try {
         Write-Info 'Collect the resource ids above into arcNodeResourceIds for the Stage 5 ARM parameters.'
     }
 
-    Write-Info 'Arc registration prerequisite for Stage 5: every node must be Connected, use gateway mode when enabled, and expose the expected AzureLocal partner SolutionVersion.'
+    Write-Info 'Arc registration prerequisite for Stage 5: every node must be Connected; gateway mode is required when enabled. TargetSolutionVersion/partner metadata are validated only when the installed initializer supports them.'
     Complete-Ui -FinalMessage "Arc stage finished ($Mode)."
 }
 catch {
