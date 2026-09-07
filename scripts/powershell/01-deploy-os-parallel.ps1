@@ -94,8 +94,13 @@ $worker = Join-Path $PSScriptRoot 'deploy-os.ps1'
 if (-not (Test-Path -LiteralPath $serveScript -PathType Leaf)) { throw "Missing serve-iso.ps1: $serveScript" }
 if (-not (Test-Path -LiteralPath $worker -PathType Leaf)) { throw "Missing deploy-os.ps1: $worker" }
 
-$isoDir = Split-Path -LiteralPath $ISOFile -Parent
-$isoName = Split-Path -LiteralPath $ISOFile -Leaf
+# Avoid PowerShell 5.1 Split-Path parameter-set ambiguity.
+$isoFullPath = [System.IO.Path]::GetFullPath($ISOFile)
+$isoDir = [System.IO.Path]::GetDirectoryName($isoFullPath)
+$isoName = [System.IO.Path]::GetFileName($isoFullPath)
+if ([string]::IsNullOrWhiteSpace($isoDir)) {
+    $isoDir = (Get-Location).Path
+}
 $prefixHost = if ($HttpBind -and $HttpBind -notin @('0.0.0.0','+')) { $HttpBind } else { '+' }
 $prefix = "http://$prefixHost`:$HttpPort/"
 $isoUrl = "http://$HttpHost`:$HttpPort/$([Uri]::EscapeDataString($isoName))"
