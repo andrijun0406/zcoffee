@@ -37,6 +37,11 @@ $b = $PSBoundParameters
 $LocalAdminUser = Resolve-Setting -Name 'LocalAdminUser' -Bound $b -Current $LocalAdminUser -ConfigKey 'LocalAdminUser' -Config $cfg
 if (-not $LocalAdminUser) { $LocalAdminUser = 'Administrator' }
 
+# Always qualify local accounts for IP-based WinRM/Negotiate. Stage 2
+# constructs PSCredential directly when a password is passed.
+$authUser = $LocalAdminUser
+if ($authUser -notmatch '[\\@]') { $authUser = ".\$authUser" }
+
 if (-not $b.ContainsKey('NodeIPs')) {
     if ($cfg.ContainsKey('Nodes')) {
         $NodeIPs = @($cfg.Nodes | ForEach-Object { $_.HostIP })
@@ -48,11 +53,10 @@ if (-not $NodeIPs -or $NodeIPs.Count -eq 0) { throw 'At least one node IP is req
 if (-not $Port) { $Port = if ($Transport -eq 'HTTPS') { 5986 } else { 5985 } }
 
 if (-not $b.ContainsKey('LocalAdminPassword') -or $null -eq $LocalAdminPassword) {
-    $authUser = $LocalAdminUser
-    if ($authUser -notmatch '[\\@]') { $authUser = ".\$authUser" }
     $cred = Get-LabNodeCredential -User $authUser
     $LocalAdminPassword = $cred.Password
 }
+Write-Info "Using WinRM account '$authUser' for both Stage 2 and Stage 3."
 
 $stage2 = Join-Path $PSScriptRoot '02-configure-network.ps1'
 $stage3 = Join-Path $PSScriptRoot '03-prepare-node.ps1'
@@ -65,7 +69,7 @@ try {
     Invoke-Step 'Stage 2 - validate host network' {
         $args2 = @{
             NodeIPs = $NodeIPs
-            LocalAdminUser = $LocalAdminUser
+            LocalAdminUser = $authUser
             LocalAdminPassword = $LocalAdminPassword
             Transport = $Transport
             Port = $Port
@@ -85,7 +89,7 @@ try {
     Invoke-Step 'Stage 3 - validate node readiness' {
         $args3 = @{
             NodeIPs = $NodeIPs
-            LocalAdminUser = $LocalAdminUser
+            LocalAdminUser = $authUser
             LocalAdminPassword = $LocalAdminPassword
             Transport = $Transport
             Port = $Port
