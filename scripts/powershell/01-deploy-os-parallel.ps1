@@ -33,8 +33,19 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'ui-common.ps1')
 
-$cfg = Import-LabConfig
-$b = $PSBoundParameters
+# Initialize runtime state before any operation that can fail so early errors are reportable.
+$serverProcess = $null
+$runspacePool = $null
+$jobs = @()
+$workerErrors = New-Object System.Collections.Generic.List[string]
+$serverStartedAt = Get-Date
+
+Initialize-Ui -StageName '01-deploy-os-parallel' -TotalSteps 4 -UseGui:$UseGui
+
+try {
+    Write-Info 'Initializing parallel OS deployment launcher.'
+    $cfg = Import-LabConfig
+    $b = $PSBoundParameters
 
 $iDRACUser = Resolve-Setting -Name 'iDRACUser' -Bound $b -Current $iDRACUser -ConfigKey 'iDRACUser' -Config $cfg
 if (-not $iDRACUser) { $iDRACUser = 'root' }
@@ -96,15 +107,6 @@ $psExe = if ($PSVersionTable.PSEdition -eq 'Core') {
 }
 if (-not (Test-Path -LiteralPath $psExe)) { $psExe = 'powershell.exe' }
 
-$serverProcess = $null
-$runspacePool = $null
-$jobs = @()
-$workerErrors = New-Object System.Collections.Generic.List[string]
-$serverStartedAt = Get-Date
-
-Initialize-Ui -StageName '01-deploy-os-parallel' -TotalSteps 4 -UseGui:$UseGui
-
-try {
     Invoke-Step 'Verify Administrator privileges' {
         $id = [Security.Principal.WindowsIdentity]::GetCurrent()
         $principal = [Security.Principal.WindowsPrincipal]::new($id)
@@ -116,6 +118,7 @@ try {
     Invoke-Step 'Start one concurrent ISO HTTP server' {
         $errFile = Join-Path $env:TEMP "zcoffee-iso-parallel-$PID.err"
         $outFile = Join-Path $env:TEMP "zcoffee-iso-parallel-$PID.out"
+        Write-Info "ISO server diagnostics: $errFile"
         $serverProcess = Start-Process -FilePath $psExe `
             -ArgumentList @(
                 '-NoProfile','-ExecutionPolicy','Bypass','-File',$serveScript,
