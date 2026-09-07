@@ -22,8 +22,11 @@
 .NOTES
     Arc initialization is evaluated by postconditions. Some AzSHCI.ARCInstaller builds can
     create/connect the Arc machine and then emit an internal Trace-Execution error; that is
-    reported as a warning when azcmagent status is Connected. Args are built from the cmdlet's
-    ACTUAL parameters on the node so this survives installer version changes.
+    reported as a warning when azcmagent status is Connected. The operational success criterion
+    is the node's observed Connected state, not merely a clean return from the initializer.
+    Args are built from the cmdlet's ACTUAL parameters on the node so this survives installer
+    version changes. Azure-side Get-AzConnectedMachine verification remains the final control-plane
+    check before Stage 5.
 #>
 [CmdletBinding(SupportsShouldProcess = $true)]
 param(
@@ -167,7 +170,10 @@ $remoteArc = {
     }
 
     function Wait-ArcConnected {
-        param([int]$TimeoutSeconds = 120)
+        # Arc onboarding can cross WinRM, the local agent, Arc Gateway, and Azure control-plane
+        # propagation. Two minutes was too aggressive for the lab's VPN path; keep this bounded
+        # but allow up to five minutes before classifying the initializer as unsuccessful.
+        param([int]$TimeoutSeconds = 300)
 
         $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
         do {
@@ -185,8 +191,9 @@ $remoteArc = {
         param($State)
 
         if ($null -eq $State) { return }
-        $o.ArcStatus = [string]$State.Status
-        $o.GatewayMode = [string]$State.Mode
+        $o.ArcStatus = ([string]$State.Status).Trim()
+        # azcmagent output can contain CR/LF; normalize it once so every later comparison is stable.
+        $o.GatewayMode = ([string]$State.Mode).Trim()
         $o.PartnerConfigured = [bool]$State.PartnerConfigured
         $o.PartnerSolutionVersion = $State.PartnerSolutionVersion
     }
@@ -291,8 +298,10 @@ $remoteArc = {
                 # azcmagent before throwing an internal Trace-Execution error. Treat
                 # Connected as the authoritative postcondition instead of retrying or
                 # reporting a false registration failure.
-                $postFailureState = Wait-ArcConnected -TimeoutSeconds 120
+                $postFailureState = Wait-ArcConnected
                 Apply-ArcNodeState $postFailureState
+                $o.Actions += "Postcondition ArcStatus: $($postFailureState.Status)"
+                $o.Actions += "Postcondition GatewayMode: $($postFailureState.Mode)"
 
                 if ($postFailureState.Status -eq 'Connected') {
                     $initializerSucceeded = $true
@@ -308,8 +317,10 @@ $remoteArc = {
                         $o.Actions += 'Legacy Arc initialization completed without ArcGatewayID'
                     } catch {
                         $legacyError = $_.Exception.Message
-                        $legacyState = Wait-ArcConnected -TimeoutSeconds 120
+                        $legacyState = Wait-ArcConnected
                         Apply-ArcNodeState $legacyState
+                        $o.Actions += "Legacy postcondition ArcStatus: $($legacyState.Status)"
+                        $o.Actions += "Legacy postcondition GatewayMode: $($legacyState.Mode)"
                         if ($legacyState.Status -eq 'Connected') {
                             $initializerSucceeded = $true
                             $o.Warnings += "Legacy initializer emitted an error after onboarding; postcondition Connected verified: $legacyError"
@@ -661,7 +672,8 @@ try {
             }
             $gatewayMatches = $true
             if ($script:UseArcGateway) {
-                $gatewayMatches = ($r.GatewayMode -match '(?i)^gateway$')
+                # Gateway mode is a local-agent postcondition; compare the trimmed value exactly.
+                $gatewayMatches = (([string]$r.GatewayMode).Trim() -ieq 'gateway')
             }
             $r.ReadyForAzureLocal = ($r.ArcStatus -eq 'Connected') -and $gatewayMatches -and $partnerMatches
 
@@ -673,6 +685,9 @@ try {
                 $escapedMachineName = [System.Uri]::EscapeDataString([string]$machineName)
                 $associationPath = "/subscriptions/$($script:SubscriptionId)/resourceGroups/$($script:ResourceGroupName)/providers/Microsoft.HybridCompute/machines/$escapedMachineName/providers/Microsoft.HybridCompute/settings/default?api-version=2024-07-31-preview"
                 $associationPayload = @{ properties = @{ gatewayProperties = @{ gatewayResourceId = $script:ArcGatewayID } } } | ConvertTo-Json -Depth 6 -Compress
+                # Association is intentionally idempotent: rerunning Stage 4 may return an
+                # already-associated response. Treat any non-throwing REST call as acknowledged;
+                # the subsequent local gateway-mode check is the meaningful node postcondition.
                 $associationResponse = Invoke-AzRestMethod -Method PUT -Path $associationPath -Payload $associationPayload -ErrorAction Stop
                 $associationStatus = 0
                 if ($associationResponse.PSObject.Properties.Name -contains 'StatusCode') { $associationStatus = [int]$associationResponse.StatusCode }
@@ -689,13 +704,15 @@ try {
                     $mode = (& $agentPath config get connection.type 2>$null | Out-String).Trim()
                     [pscustomobject]@{ Mode = $mode }
                 }
-                if (-not $gatewayMode -or $gatewayMode.Mode -notmatch '(?i)gateway') {
+                # Some Invoke-AzRestMethod versions omit StatusCode; no exception is the
+                # acknowledgement. The authoritative local check is the normalized agent mode.
+                if (-not $gatewayMode -or (([string]$gatewayMode.Mode).Trim() -ine 'gateway')) {
                     throw "$ip did not report connection.type=gateway after association."
                 }
                 Write-Ok "$ip local Arc agent is using gateway mode"
                 $r.GatewayMode = $gatewayMode.Mode
                 $r.ReadyForAzureLocal = ($r.ArcStatus -eq 'Connected') -and
-                    ($r.GatewayMode -match '(?i)^gateway$') -and $partnerMatches
+                    (([string]$r.GatewayMode).Trim() -ieq 'gateway') -and $partnerMatches
             }
 
             foreach ($a in $r.Actions)  { Write-Ok  $a }
@@ -725,6 +742,8 @@ try {
     }
 
     if ($registerMode) {
+        # This is the final control-plane verification. Local azcmagent Connected state alone
+        # is insufficient if Azure has not yet materialized the machine resource/status.
         Write-Info 'Verifying Arc-connected machines in Azure (may take a few minutes to appear)...'
         Import-Module Az.ConnectedMachine -ErrorAction SilentlyContinue
         foreach ($ip in $NodeIPs) {
