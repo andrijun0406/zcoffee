@@ -107,6 +107,7 @@ $psExe = if ($PSVersionTable.PSEdition -eq 'Core') {
 }
 if (-not (Test-Path -LiteralPath $psExe)) { $psExe = 'powershell.exe' }
 
+    Write-Info 'Preflight complete; beginning privileged execution steps.'
     Invoke-Step 'Verify Administrator privileges' {
         $id = [Security.Principal.WindowsIdentity]::GetCurrent()
         $principal = [Security.Principal.WindowsPrincipal]::new($id)
@@ -119,22 +120,22 @@ if (-not (Test-Path -LiteralPath $psExe)) { $psExe = 'powershell.exe' }
         $errFile = Join-Path $env:TEMP "zcoffee-iso-parallel-$PID.err"
         $outFile = Join-Path $env:TEMP "zcoffee-iso-parallel-$PID.out"
         Write-Info "ISO server diagnostics: $errFile"
-        # Do not combine -WindowStyle with standard-stream redirection here.
-        # Windows PowerShell 5.1 resolves those switches to incompatible
-        # Start-Process parameter sets.
+        # Use only the basic Start-Process parameter set. Windows PowerShell 5.1
+        # can reject combinations of redirection/window switches before the server
+        # starts. The server writes its own startup/errors to its console window.
+        $serverArgs = @(
+            '-NoProfile','-ExecutionPolicy','Bypass','-File',$serveScript,
+            '-Prefix',$prefix,'-Directory',$isoDir
+        )
+        Write-Info "Launching ISO server: $psExe $($serverArgs -join ' ')"
         $serverProcess = Start-Process -FilePath $psExe `
-            -ArgumentList @(
-                '-NoProfile','-ExecutionPolicy','Bypass','-File',$serveScript,
-                '-Prefix',$prefix,'-Directory',$isoDir
-            ) `
-            -PassThru `
-            -RedirectStandardError $errFile `
-            -RedirectStandardOutput $outFile
+            -ArgumentList $serverArgs `
+            -WorkingDirectory $isoDir `
+            -PassThru
 
         Start-Sleep -Seconds 3
         if ($serverProcess.HasExited) {
-            $detail = if (Test-Path $errFile) { Get-Content $errFile -Raw } else { '' }
-            throw "ISO HTTP server exited unexpectedly: $detail"
+            throw "ISO HTTP server exited unexpectedly with code $($serverProcess.ExitCode)."
         }
         $tcp = New-Object System.Net.Sockets.TcpClient
         try {
@@ -171,7 +172,7 @@ if (-not (Test-Path -LiteralPath $psExe)) { $psExe = 'powershell.exe' }
     }
 
     Invoke-Step 'Start concurrent iDRAC OS workers' {
-        $runspacePool = [runspacefactory]::CreateRunspacePool(1, $iDRACIPs.Count)
+        $runspacePool = [System.Management.Automation.Runspaces.RunspaceFactory]::CreateRunspacePool(1, $iDRACIPs.Count)
         $runspacePool.Open()
 
         foreach ($node in $iDRACIPs) {
@@ -180,15 +181,18 @@ if (-not (Test-Path -LiteralPath $psExe)) { $psExe = 'powershell.exe' }
             [void]$ps.AddScript({
                 param($workerPath, $target, $user, $password, $url, $racadm, $start, $noCert)
                 $workerArgs = @{
-                    NodeIP          = $target
-                    iDRACUser       = $user
-                    iDRACPassword   = $password
-                    ISOUrl          = $url
-                    RACADMPath      = $racadm
-                    StartInstallation = [bool]$start
-                    NoCertWarn      = [bool]$noCert
+                    NodeIP        = $target
+                    iDRACUser     = $user
+                    iDRACPassword = $password
+                    ISOUrl        = $url
+                    RACADMPath    = $racadm
                 }
-                & $workerPath @workerArgs
+                # Switch parameters must be omitted when false. Passing an explicit
+                # $false value can produce confusing binding errors in Windows
+                # PowerShell 5.1 when invoked through a runspace.
+                if ($start)   { $workerArgs['StartInstallation'] = $true }
+                if ($noCert)  { $workerArgs['NoCertWarn'] = $true }
+                & $workerPath @workerArgs 2>&1
                 if ($LASTEXITCODE -ne 0) {
                     throw "deploy-os.ps1 failed for $target (exit code $LASTEXITCODE)"
                 }
@@ -256,7 +260,21 @@ if (-not (Test-Path -LiteralPath $psExe)) { $psExe = 'powershell.exe' }
     Complete-Ui -FinalMessage 'Parallel OS deployment launcher finished.'
 }
 catch {
-    Write-Err $_.Exception.Message
+    $caught = $_
+    Write-Host ''
+    Write-Host '===== FULL EXCEPTION =====' -ForegroundColor Red
+    $caught | Format-List * -Force | Out-Host
+    Write-Host ''
+    Write-Host '===== POSITION =====' -ForegroundColor Red
+    if ($caught.InvocationInfo) {
+        $caught.InvocationInfo.PositionMessage | Out-Host
+    }
+    Write-Host ''
+    Write-Host '===== SCRIPT STACK =====' -ForegroundColor Red
+    if ($caught.ScriptStackTrace) {
+        $caught.ScriptStackTrace | Out-Host
+    }
+    Write-Err $caught.Exception.Message
     Complete-Ui -Failed -FinalMessage 'Parallel OS deployment launcher failed.'
     throw
 }
