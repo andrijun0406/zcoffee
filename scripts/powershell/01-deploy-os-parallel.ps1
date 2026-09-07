@@ -132,11 +132,37 @@ if (-not (Test-Path -LiteralPath $psExe)) { $psExe = 'powershell.exe' }
             $detail = if (Test-Path $errFile) { Get-Content $errFile -Raw } else { '' }
             throw "ISO HTTP server exited unexpectedly: $detail"
         }
-        if (-not (Test-NetConnection -ComputerName $HttpHost -Port $HttpPort `
-            -InformationLevel Quiet -WarningAction SilentlyContinue)) {
-            throw "ISO server is not reachable at $HttpHost`:$HttpPort"
+        $tcp = New-Object System.Net.Sockets.TcpClient
+        try {
+            $async = $tcp.BeginConnect($HttpHost, $HttpPort, $null, $null)
+            if (-not $async.AsyncWaitHandle.WaitOne(15000)) {
+                throw "TCP probe timed out"
+            }
+            $tcp.EndConnect($async)
         }
-        $null = Invoke-WebRequest -Uri $isoUrl -Method Head -TimeoutSec 15 -UseBasicParsing
+        catch {
+            throw "ISO server is not reachable at $HttpHost`:$HttpPort - $($_.Exception.Message)"
+        }
+        finally {
+            $tcp.Close()
+        }
+
+        $request = [System.Net.HttpWebRequest]::Create($isoUrl)
+        $request.Method = 'HEAD'
+        $request.Timeout = 15000
+        $response = $null
+        try {
+            $response = $request.GetResponse()
+            if ([int]$response.StatusCode -lt 200 -or [int]$response.StatusCode -ge 400) {
+                throw "HTTP probe returned $([int]$response.StatusCode)"
+            }
+        }
+        catch {
+            throw "ISO HTTP probe failed at $isoUrl - $($_.Exception.Message)"
+        }
+        finally {
+            if ($response) { $response.Close() }
+        }
         Write-Ok "Serving $isoName for $($iDRACIPs.Count) concurrent iDRAC workers at $isoUrl"
     }
 
@@ -149,16 +175,18 @@ if (-not (Test-Path -LiteralPath $psExe)) { $psExe = 'powershell.exe' }
             $ps.RunspacePool = $runspacePool
             [void]$ps.AddScript({
                 param($workerPath, $target, $user, $password, $url, $racadm, $start, $noCert)
-                & $workerPath `
-                    -NodeIP $target `
-                    -iDRACUser $user `
-                    -iDRACPassword $password `
-                    -ISOUrl $url `
-                    -RACADMPath $racadm `
-                    -StartInstallation:$start `
-                    -NoCertWarn:$noCert
-                if (-not $?) {
-                    throw "deploy-os.ps1 failed for $target"
+                $workerArgs = @{
+                    NodeIP          = $target
+                    iDRACUser       = $user
+                    iDRACPassword   = $password
+                    ISOUrl          = $url
+                    RACADMPath      = $racadm
+                    StartInstallation = [bool]$start
+                    NoCertWarn      = [bool]$noCert
+                }
+                & $workerPath @workerArgs
+                if ($LASTEXITCODE -ne 0) {
+                    throw "deploy-os.ps1 failed for $target (exit code $LASTEXITCODE)"
                 }
             }).AddArgument($worker).AddArgument($node).AddArgument($iDRACUser).AddArgument($iDRACPassword).AddArgument($isoUrl).AddArgument($RACADMPath).AddArgument([bool]$StartInstallation).AddArgument([bool]$NoCertWarn)
 
