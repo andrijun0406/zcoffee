@@ -36,7 +36,8 @@ $ErrorActionPreference = 'Stop'
 # Initialize runtime state before any operation that can fail so early errors are reportable.
 $serverProcess = $null
 $runspacePool = $null
-$jobs = @()
+$jobs = New-Object System.Collections.ArrayList
+if ($jobs -isnot [System.Collections.ArrayList]) { throw 'Failed to initialize parallel worker collection.' }
 $workerErrors = New-Object System.Collections.Generic.List[string]
 $serverStartedAt = Get-Date
 
@@ -203,11 +204,12 @@ if (-not (Test-Path -LiteralPath $psExe)) { $psExe = 'powershell.exe' }
                 }
             }).AddArgument($worker).AddArgument($node).AddArgument($iDRACUser).AddArgument($iDRACPassword).AddArgument($isoUrl).AddArgument($RACADMPath).AddArgument([bool]$StartInstallation).AddArgument([bool]$NoCertWarn)
 
-            $jobs += [pscustomobject]@{
-                Node = $node
+            $jobRecord = [pscustomobject]@{
+                Node       = $node
                 PowerShell = $ps
-                Handle = $ps.BeginInvoke()
+                Handle     = $ps.BeginInvoke()
             }
+            [void]$jobs.Add($jobRecord)
             Write-Info "Started worker for iDRAC $node"
         }
 
