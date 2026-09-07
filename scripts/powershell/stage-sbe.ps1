@@ -18,7 +18,7 @@ param(
 
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
-Write-Host ('[ZCOFFEE] stage-sbe-verbose.ps1 executing: ' + $PSCommandPath) -ForegroundColor Cyan
+Write-Host ('[ZCOFFEE] stage-sbe.ps1 executing: ' + $PSCommandPath) -ForegroundColor Cyan
 Write-Host ('[ZCOFFEE] PowerShell: ' + $PSVersionTable.PSVersion) -ForegroundColor Cyan
 Write-Host ('[ZCOFFEE] Source: ' + $SbeSourcePath) -ForegroundColor Cyan
 Write-Host ('[ZCOFFEE] Nodes: ' + ($NodeIPs -join ', ')) -ForegroundColor Cyan
@@ -31,10 +31,10 @@ if ($LocalAdminUser -notmatch '[\\@]') { $authUser = '.\' + $LocalAdminUser } el
 
 function Get-SbeFiles {
     param([Parameter(Mandatory=$true)][string]$Root)
-    if (-not (Test-Path -LiteralPath $Root -PathType Container)) {
+    if (-not (Test-Path -Path $Root -PathType Container)) {
         throw "SBE source directory not found: $Root"
     }
-    $all = @(Get-ChildItem -LiteralPath $Root -Recurse -File -ErrorAction Stop)
+    $all = @(Get-ChildItem -Path $Root -Recurse -File -ErrorAction Stop)
     $selected = @($all | Where-Object {
         $_.Extension -in @('.xml','.zip','.cab','.msu') -and
         $_.Name -notmatch '^\.'
@@ -54,26 +54,27 @@ function Get-RemoteSummary {
     $r = Invoke-Command -Session $Session -ScriptBlock {
         param($p)
         $files = @()
-        if (Test-Path -LiteralPath $p -PathType Container) {
-            $files = @(Get-ChildItem -LiteralPath $p -Recurse -File -ErrorAction SilentlyContinue)
+        if (Test-Path -Path $p -PathType Container) {
+            $files = @(Get-ChildItem -Path $p -Recurse -File -ErrorAction SilentlyContinue)
         }
         [pscustomobject]@{
-            Exists = (Test-Path -LiteralPath $p -PathType Container)
+            Exists = (Test-Path -Path $p -PathType Container)
             FileCount = $files.Count
             ManifestCount = @($files | Where-Object { $_.Extension -ieq '.xml' }).Count
             PayloadCount = @($files | Where-Object { $_.Extension -in @('.zip','.cab','.msu') }).Count
+            PowerShellVersion = $PSVersionTable.PSVersion.ToString()
         }
     } -ArgumentList $Path
     return @($r | Select-Object -Last 1)
 }
 
 $logRoot = Join-Path $PSScriptRoot 'logs'
-if (-not (Test-Path -LiteralPath $logRoot)) { New-Item -LiteralPath $logRoot -ItemType Directory -Force | Out-Null }
+if (-not (Test-Path -Path $logRoot)) { New-Item -Path $logRoot -ItemType Directory -Force | Out-Null }
 $sourceFiles = @()
 $failures = New-Object System.Collections.ArrayList
 
 try {
-    Initialize-Ui -StageName 'stage-sbe-verbose' -TotalSteps 3
+    Initialize-Ui -StageName 'stage-sbe' -TotalSteps 3
 
     Invoke-Step 'Validate local SBE source' {
         $script:sourceFiles = @(Get-SbeFiles -Root $SbeSourcePath)
@@ -110,23 +111,24 @@ try {
                 }
                 $session = New-PSSession @sessionArgs
                 $before = Get-RemoteSummary -Session $session -Path $RemoteSbePath
+                Write-Info ($ip + ': remote PowerShell=' + $before.PowerShellVersion)
                 Write-Info ($ip + ': before Exists=' + $before.Exists + ' Files=' + $before.FileCount)
 
                 if ($Apply) {
                     $remoteStage = $RemoteSbePath + '.zcoffee-stage-' + [guid]::NewGuid().ToString('N')
-                    Invoke-Command -Session $session -ScriptBlock { param($p) New-Item -LiteralPath $p -ItemType Directory -Force | Out-Null } -ArgumentList $remoteStage
+                    Invoke-Command -Session $session -ScriptBlock { param($p) New-Item -Path $p -ItemType Directory -Force | Out-Null } -ArgumentList $remoteStage
                     foreach ($file in $script:sourceFiles) {
                         $source = [string]$file.FullName
-                        if ([string]::IsNullOrWhiteSpace($source) -or -not (Test-Path -LiteralPath $source -PathType Leaf)) { throw ('Missing source file: ' + $source) }
+                        if ([string]::IsNullOrWhiteSpace($source) -or -not (Test-Path -Path $source -PathType Leaf)) { throw ('Missing source file: ' + $source) }
                         Write-Info ($ip + ': copying ' + $file.Name + ' (' + $file.Length + ' bytes)')
                         Copy-Item -Path $source -Destination $remoteStage -ToSession $session -Force -ErrorAction Stop
                     }
                     Invoke-Command -Session $session -ScriptBlock {
                         param($stage,$dest,$replace)
-                        if ($replace -and (Test-Path -LiteralPath $dest)) { Remove-Item -LiteralPath $dest -Recurse -Force }
-                        New-Item -LiteralPath $dest -ItemType Directory -Force | Out-Null
-                        foreach ($f in @(Get-ChildItem -LiteralPath $stage -File -Force)) { Copy-Item -LiteralPath $f.FullName -Destination $dest -Force }
-                        Remove-Item -LiteralPath $stage -Recurse -Force
+                        if ($replace -and (Test-Path -Path $dest)) { Remove-Item -Path $dest -Recurse -Force }
+                        New-Item -Path $dest -ItemType Directory -Force | Out-Null
+                        foreach ($f in @(Get-ChildItem -Path $stage -File -Force)) { Copy-Item -Path $f.FullName -Destination $dest -Force }
+                        Remove-Item -Path $stage -Recurse -Force
                     } -ArgumentList $remoteStage,$RemoteSbePath,[bool]$ReplaceRemoteSbe
                     Write-Ok ($ip + ': remote copy completed')
                 }
