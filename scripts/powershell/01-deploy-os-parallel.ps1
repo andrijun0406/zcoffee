@@ -41,7 +41,7 @@ $runspacePool = $null
 $jobs = New-Object System.Collections.ArrayList
 if ($jobs -isnot [System.Collections.ArrayList]) { throw 'Failed to initialize parallel worker collection.' }
 $workerErrors = New-Object System.Collections.Generic.List[string]
-$script:serverStartedAt = Get-Date
+$script:deploymentStartedAt = Get-Date
 
 function Get-IsoHttpHealth {
     param(
@@ -199,7 +199,7 @@ if (-not (Test-Path -LiteralPath $psExe)) { $psExe = 'powershell.exe' }
     Invoke-Step 'Start or reuse one concurrent ISO HTTP server' {
         $errFile = Join-Path $env:TEMP "zcoffee-iso-parallel-$PID.err"
         $outFile = Join-Path $env:TEMP "zcoffee-iso-parallel-$PID.out"
-        $script:serverStartedAt = Get-Date
+        $script:deploymentStartedAt = Get-Date
         $serverHealthy = $false
 
         # HTTP service health is authoritative. A prior launcher may have exited
@@ -261,8 +261,11 @@ $outText
             }
         }
 
+        if ($health.RangeStatus -ne 206 -or $health.RangeLength -ne 1) {
+            throw "ISO HTTP range health is not valid: status=$($health.RangeStatus), length=$($health.RangeLength), content-range=$($health.ContentRange)."
+        }
         if ($health.AcceptRanges -and $health.AcceptRanges -notmatch '(?i)bytes') {
-            Write-Warn "ISO server did not advertise Accept-Ranges: bytes; validated GET Range response $($health.ContentRange)."
+            Write-Warn "ISO server did not advertise Accept-Ranges: bytes; the validated 206 range response is authoritative."
         }
         Write-Ok "ISO HTTP health passed: HEAD $($health.HeadStatus), Range $($health.RangeStatus), $($health.ContentLength) bytes."
         Write-Ok "Serving $isoName for $($iDRACIPs.Count) concurrent iDRAC workers at $isoUrl"
@@ -327,7 +330,7 @@ $outText
                     Write-Err "Worker failed: $($job.Node) - $($_.Exception.Message)"
                 }
             }
-            if ((Get-Date) -gt $script:serverStartedAt.AddMinutes($ServerLifetimeMinutes)) {
+            if ((Get-Date) -gt $script:deploymentStartedAt.AddMinutes($ServerLifetimeMinutes)) {
                 throw "Worker timeout exceeded $ServerLifetimeMinutes minute(s)."
             }
             Start-Sleep -Seconds 2
@@ -357,7 +360,7 @@ $outText
         }
         Write-Info "Keeping the single ISO server alive for up to $ServerLifetimeMinutes minute(s)."
         Write-Info 'Leave this window running until both nodes finish Windows Setup and return WinRM.'
-        while ((Get-Date) -lt $script:serverStartedAt.AddMinutes($ServerLifetimeMinutes)) {
+        while ((Get-Date) -lt $script:deploymentStartedAt.AddMinutes($ServerLifetimeMinutes)) {
             $health = Get-IsoHttpHealth -Url $isoUrl -TimeoutMilliseconds 5000
             if (-not $health.Healthy) {
                 throw "ISO HTTP service health failed during Windows Setup at $isoUrl. $($health.Error)"

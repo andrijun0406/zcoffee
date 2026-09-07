@@ -215,10 +215,10 @@ echo [%DATE% %TIME%] FINAL_BOSS_INDEX=[!BOSS_INDEX!]>> "%LOG%"
 
 if not defined BOSS_INDEX (
     echo [%DATE% %TIME%] FAILURE: no DELLBOSS VD detected. Setup is stopping instead of falling through to manual/upgrade selection.>> "%LOG%"
-    if exist W:\Windows\. (
+    if exist W:\. (
         if not exist W:\Windows\Temp mkdir W:\Windows\Temp >nul 2>&1
-        copy /Y "%LOG%" W:\Windows\Tempootdisk-select.log >nul 2>&1
-        copy /Y "%LOG%" W:ootdisk-select.log >nul 2>&1
+        copy /Y "%LOG%" W:\Windows\Temp\bootdisk-select.log >nul 2>&1
+        copy /Y "%LOG%" W:\bootdisk-select.log >nul 2>&1
     )
     endlocal ^& exit /b 20
 )
@@ -251,10 +251,10 @@ set "DP_RC=!ERRORLEVEL!"
 echo [%DATE% %TIME%] diskpart exit code: !DP_RC!>> "%LOG%"
 if not "!DP_RC!"=="0" (
     echo [%DATE% %TIME%] FAILURE: diskpart did not complete successfully. Setup is stopping.>> "%LOG%"
-    if exist W:\Windows\. (
+    if exist W:\. (
         if not exist W:\Windows\Temp mkdir W:\Windows\Temp >nul 2>&1
-        copy /Y "%LOG%" W:\Windows\Tempootdisk-select.log >nul 2>&1
-        copy /Y "%LOG%" W:ootdisk-select.log >nul 2>&1
+        copy /Y "%LOG%" W:\Windows\Temp\bootdisk-select.log >nul 2>&1
+        copy /Y "%LOG%" W:\bootdisk-select.log >nul 2>&1
     )
     endlocal ^& exit /b 21
 )
@@ -272,11 +272,30 @@ set "VF=X:\verify.txt"
 echo [%DATE% %TIME%] === POST-DISKPART INVENTORY (list disk / list volume) ===>> "%LOG%"
 diskpart /s "%VF%" >> "%LOG%" 2>&1
 echo [%DATE% %TIME%] === END POST-DISKPART INVENTORY ===>> "%LOG%"
+
+rem --- Validate that diskpart created both expected volumes before Setup continues ---
+if not exist S:\. (
+    echo [%DATE% %TIME%] FAILURE: EFI volume S: was not created. Setup is stopping.>> "%LOG%"
+    if exist W:\. (
+        if not exist W:\Windows\Temp mkdir W:\Windows\Temp >nul 2>&1
+        copy /Y "%LOG%" W:\Windows\Temp\bootdisk-select.log >nul 2>&1
+        copy /Y "%LOG%" W:\bootdisk-select.log >nul 2>&1
+    )
+    endlocal ^& exit /b 22
+)
+if not exist W:\. (
+    echo [%DATE% %TIME%] FAILURE: Windows volume W: was not created. Setup is stopping.>> "%LOG%"
+    endlocal ^& exit /b 23
+)
+
+rem --- Final identity check after partitioning ---
+echo [%DATE% %TIME%] === FINAL BOSS DEVICE CHECK ===>> "%LOG%"
+wmic diskdrive where "index=!BOSS_INDEX!" get index,model,size >> "%LOG%" 2>&1
 echo [%DATE% %TIME%] Boot disk prepared on disk !BOSS_INDEX! (EFI=S: MSR Windows=W:). Done.>> "%LOG%"
-if exist W:\Windows\. (
+if exist W:\. (
     if not exist W:\Windows\Temp mkdir W:\Windows\Temp >nul 2>&1
-    copy /Y "%LOG%" W:\Windows\Tempootdisk-select.log >nul 2>&1
-    copy /Y "%LOG%" W:ootdisk-select.log >nul 2>&1
+    copy /Y "%LOG%" W:\Windows\Temp\bootdisk-select.log >nul 2>&1
+    copy /Y "%LOG%" W:\bootdisk-select.log >nul 2>&1
 )
 endlocal ^& exit /b 0
 "@
