@@ -809,9 +809,28 @@ try {
         $runtimeParameterFileName = 'zcoffee-arm-parameters-{0}-{1}.json' -f `
             $script:DeploymentName, ([Guid]::NewGuid().ToString('N'))
         $script:runtimeParameterFile = Join-Path ([IO.Path]::GetTempPath()) $runtimeParameterFileName
-        $runtimeJson = $runtimeDoc | ConvertTo-Json -Depth 100
+        # Windows PowerShell 5.1 can collapse a one-item array when ConvertTo-Json
+        # serializes nested hashtables. Use the .NET serializer so ARM receives
+        # dnsServers.value as JSON ["10.8.230.51"], not JSON "10.8.230.51".
+        Add-Type -AssemblyName System.Web.Extensions -ErrorAction Stop
+        $jsonSerializer = New-Object System.Web.Script.Serialization.JavaScriptSerializer
+        $jsonSerializer.MaxJsonLength = [int]::MaxValue
+        $runtimeJson = $jsonSerializer.Serialize($runtimeDoc)
         $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
         [IO.File]::WriteAllText($script:runtimeParameterFile, $runtimeJson, $utf8NoBom)
+
+        # Read back the exact file that ARM will consume and fail before What-If
+        # if an array was flattened during serialization.
+        $runtimeCheck = $jsonSerializer.DeserializeObject($runtimeJson)
+        if (($runtimeCheck['parameters'].Keys -contains 'dnsServers')) {
+            $dnsCheck = $runtimeCheck['parameters']['dnsServers']['value']
+            if ($null -eq $dnsCheck -or
+                -not ($dnsCheck -is [System.Collections.IEnumerable]) -or
+                ($dnsCheck -is [string])) {
+                throw 'Runtime ARM parameter file serialized dnsServers.value as a scalar; refusing to continue.'
+            }
+            Write-Info "Serialized dnsServers.value is an array; Count=$(@($dnsCheck).Count)"
+        }
 
         Write-Info "Runtime ARM parameter file: $script:runtimeParameterFile"
         Write-Info "Runtime ARM parameter count: $($runtimeDoc.parameters.Count)"
