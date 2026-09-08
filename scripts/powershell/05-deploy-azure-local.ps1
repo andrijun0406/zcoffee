@@ -815,7 +815,7 @@ try {
 
         Write-Info "Runtime ARM parameter file: $script:runtimeParameterFile"
         Write-Info "Runtime ARM parameter count: $($runtimeDoc.parameters.Count)"
-        if ($runtimeDoc.parameters.ContainsKey('dnsServers')) {
+        if ($runtimeDoc.parameters.Keys -contains 'dnsServers') {
             $dnsRuntime = $runtimeDoc.parameters['dnsServers'].value
             if ($null -ne $dnsRuntime) {
                 $dnsType = $dnsRuntime.GetType().FullName
