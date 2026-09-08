@@ -98,6 +98,9 @@ param(
 
     [int]$Port,
 
+    # Required only for HTTPS WinRM listeners using self-signed certificates.
+    [switch]$SkipCertCheck,
+
     [switch]$UseExistingAzLogin,
 
     # Unattended service-principal / managed-identity auth (zero-touch).
@@ -379,9 +382,9 @@ try {
 
 
 
-        $templateJson = Get-Content $script:TemplateFile -Raw | ConvertFrom-Json
+        $script:templateJson = Get-Content $script:TemplateFile -Raw | ConvertFrom-Json
 
-        $templateParameterNames = @($templateJson.parameters.PSObject.Properties.Name)
+        $templateParameterNames = @($script:templateJson.parameters.PSObject.Properties.Name)
 
         Write-Info "ARM template parameters loaded: $($templateParameterNames.Count)"
 
@@ -459,7 +462,9 @@ try {
 
 
 
-            if ($script:TargetSolutionVersion -and $script:NodeIPs) {
+            # Always validate the node-side Arc postconditions. TargetSolutionVersion
+            # only controls whether partner metadata is enforceable.
+            if ($script:NodeIPs) {
 
                 if (-not $script:nodeCredential) {
 
@@ -483,7 +488,17 @@ try {
 
                     $conn = @{ ComputerName=$nodeByName[$name]; Credential=$script:nodeCredential; Port=$script:Port; Authentication='Negotiate'; ErrorAction='Stop' }
 
-                    if ($script:Transport -eq 'HTTPS') { $conn['UseSSL']=$true }
+                    if ($script:Transport -eq 'HTTPS') {
+
+                        $conn['UseSSL'] = $true
+
+                        if ($script:SkipCertCheck) {
+                            # Match Stage 4 behavior for self-signed WinRM HTTPS listeners.
+                            $conn['SessionOption'] = New-PSSessionOption `
+                                -SkipCACheck `
+                                -SkipCNCheck
+                        }
+                    }
 
                     $state = Invoke-Command @conn -ScriptBlock {
 
@@ -548,9 +563,15 @@ try {
 
                     if ($state.Status -ne 'Connected') { throw "Arc node $name is not Connected." }
 
-                    if ($script:UseArcGateway -and $state.Gateway.Trim() -notmatch '(?i)^gateway$') { throw "Arc node $name is not using gateway mode." }
+                    $gatewayMode = if ($null -eq $state.Gateway) { '' } else { ([string]$state.Gateway).Trim() }
+
+                    if ($script:UseArcGateway -and $gatewayMode -notmatch '(?i)^gateway$') {
+                        throw "Arc node $name is not using gateway mode (reported '$gatewayMode')."
+                    }
 
 
+
+                    Write-Info "Arc node $name postconditions: Status=$($state.Status); GatewayMode=$gatewayMode; ArcInstaller=$($state.ArcInstallerVersion)"
 
                     if ($script:TargetSolutionVersion -and $state.TargetSolutionSupported) {
 
