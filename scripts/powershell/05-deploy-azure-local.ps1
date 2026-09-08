@@ -1,4 +1,4 @@
-﻿<#
+﻿﻿<#
 
 .SYNOPSIS
 
@@ -721,14 +721,6 @@ try {
 
         $script:templateParameterObject['localAdminPassword'] = $script:LocalAdminPassword
 
-        # The parameter file intentionally defaults to Validate.  Always propagate
-        # the explicit Stage 5 mode into the ARM template so Deploy cannot submit
-        # an ARM deployment that still runs Azure Local validation only.
-        if ($script:templateJson.parameters.PSObject.Properties.Name -contains 'deploymentMode') {
-            $script:templateParameterObject['deploymentMode'] = $script:DeploymentMode
-            Write-Info "ARM deploymentMode override: $script:DeploymentMode"
-        }
-
 
 
         if ($script:gatewayTemplateOverrides -and $script:gatewayTemplateOverrides.Count -gt 0) {
@@ -739,6 +731,13 @@ try {
 
             }
 
+        }
+
+        # The parameter file defaults deploymentMode to Validate. Override it at
+        # runtime so Deploy mode cannot accidentally submit a validation deployment.
+        if ($script:templateParameterObject.ContainsKey('deploymentMode')) {
+            $script:templateParameterObject['deploymentMode'] = [string]$DeploymentMode
+            Write-Info "ARM deploymentMode override: $DeploymentMode"
         }
 
         Write-Ok "Local admin '$script:LocalAdminUser' credential prepared for injection (never logged)."
@@ -755,15 +754,13 @@ try {
 
         Invoke-Step 'Run non-mutating ARM validation (Test-AzResourceGroupDeployment)' {
 
-            $r = Test-AzResourceGroupDeployment `
-
-                    -ResourceGroupName $script:ResourceGroupName `
-
-                    -TemplateFile $script:TemplateFile `
-
-                    -TemplateParameterObject $script:templateParameterObject `
-
-                    -ErrorAction Stop 4>$null
+            $validationArgs = @{
+                ResourceGroupName       = $script:ResourceGroupName
+                TemplateFile            = $script:TemplateFile
+                TemplateParameterObject = $script:templateParameterObject
+                ErrorAction             = 'Stop'
+            }
+            $r = Test-AzResourceGroupDeployment @validationArgs 4>$null
 
             if ($r) {
 
@@ -795,15 +792,39 @@ try {
 
         Write-Info 'Running What-If (this can take a few minutes)...'
 
-        $wi = Get-AzResourceGroupDeploymentWhatIfResult `
+        # What-If must receive the same explicit template/parameter contract as
+        # Test-AzResourceGroupDeployment. Use splatting because Windows PowerShell
+        # 5.1 can break backtick-continued commands at blank lines and then emit
+        # the misleading 'TemplateFile not supplied' dynamic-parameter error.
+        if (-not (Test-Path -Path $script:TemplateFile -PathType Leaf)) {
+            throw "What-If template disappeared: $script:TemplateFile"
+        }
 
-                -ResourceGroupName $script:ResourceGroupName `
+        $whatIfCommand = Get-Command Get-AzResourceGroupDeploymentWhatIfResult `
+            -ErrorAction Stop
+        if (-not $whatIfCommand.Parameters.ContainsKey('TemplateFile') -or
+            -not $whatIfCommand.Parameters.ContainsKey('TemplateParameterObject')) {
+            throw 'Installed Az.Resources What-If cmdlet does not support TemplateFile + TemplateParameterObject.'
+        }
 
-                -TemplateFile $script:TemplateFile `
+        if ($script:DeploymentMode -eq 'Deploy') {
+            $armMode = [string]$script:templateParameterObject['deploymentMode']
+            if ($armMode -ne 'Deploy') {
+                throw "ARM deploymentMode is '$armMode'; refusing to preview or submit a non-Deploy payload."
+            }
+        }
 
-                -TemplateParameterObject $script:templateParameterObject `
+        Write-Info "What-If TemplateFile: $script:TemplateFile"
+        Write-Info "What-If Parameter Count: $($script:templateParameterObject.Count)"
+        Write-Info "What-If ARM deploymentMode: $($script:templateParameterObject['deploymentMode'])"
 
-                -ErrorAction Stop
+        $whatIfArgs = @{
+            ResourceGroupName       = $script:ResourceGroupName
+            TemplateFile            = $script:TemplateFile
+            TemplateParameterObject = $script:templateParameterObject
+            ErrorAction             = 'Stop'
+        }
+        $wi = Get-AzResourceGroupDeploymentWhatIfResult @whatIfArgs
 
         $wi | Out-Host
 
@@ -821,17 +842,14 @@ try {
 
 
 
-        $dep = New-AzResourceGroupDeployment `
-
-                -ResourceGroupName $script:ResourceGroupName `
-
-                -Name $script:DeploymentName `
-
-                -TemplateFile $script:TemplateFile `
-
-                -TemplateParameterObject $script:templateParameterObject `
-
-                -ErrorAction Stop
+        $deploymentArgs = @{
+            ResourceGroupName       = $script:ResourceGroupName
+            Name                    = $script:DeploymentName
+            TemplateFile            = $script:TemplateFile
+            TemplateParameterObject = $script:templateParameterObject
+            ErrorAction             = 'Stop'
+        }
+        $dep = New-AzResourceGroupDeployment @deploymentArgs
 
         Write-Ok "Deployment submitted: $($dep.DeploymentName) - provisioning state: $($dep.ProvisioningState)"
 
