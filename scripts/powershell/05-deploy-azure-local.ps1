@@ -182,7 +182,7 @@ $script:authUser = $LocalAdminUser
 $script:CleanupExistingRoleAssignments = [bool]$CleanupExistingRoleAssignments
 $script:IgnoreExistingRoleAssignments = [bool]$IgnoreExistingRoleAssignments
 $script:IgnoreExistingDeploymentArtifacts = [bool]$IgnoreExistingDeploymentArtifacts
-if (${script}:authUser -notmatch '[\\@]') { ${script}:authUser = ".\\${script}:authUser" }
+if ($script:authUser -notmatch '[\\@]') { $script:authUser = ".\\$script:authUser" }
 
 $UseArcGateway     = [bool](Resolve-Setting -Name 'UseArcGateway' -Bound $b -Current ([bool]$UseArcGateway) -ConfigKey 'UseArcGateway' -Config $cfg)
 
@@ -364,17 +364,17 @@ try {
 
         Import-Module Az.Resources -ErrorAction Stop
 
-        if (-not (Test-Path ${script}:TemplateFile -PathType Leaf))  { throw "ARM template not found: ${script}:TemplateFile" }
+        if (-not (Test-Path $script:TemplateFile -PathType Leaf))  { throw "ARM template not found: $script:TemplateFile" }
 
-        if (-not (Test-Path ${script}:ParameterFile -PathType Leaf)) { throw "Parameter file not found: ${script}:ParameterFile" }
+        if (-not (Test-Path $script:ParameterFile -PathType Leaf)) { throw "Parameter file not found: $script:ParameterFile" }
 
         $script:TemplateFile  = (Resolve-Path $script:TemplateFile).Path
 
         $script:ParameterFile = (Resolve-Path $script:ParameterFile).Path
 
-        Write-Ok "Template: ${script}:TemplateFile"
+        Write-Ok "Template: $script:TemplateFile"
 
-        Write-Ok "Parameters: ${script}:ParameterFile"
+        Write-Ok "Parameters: $script:ParameterFile"
 
     }
 
@@ -412,11 +412,11 @@ try {
 
         if ($script:TenantId -and $ctx.Tenant.Id -ne $script:TenantId) {
 
-            throw "Tenant mismatch. Expected ${script}:TenantId; context is $($ctx.Tenant.Id)."
+            throw "Tenant mismatch. Expected $script:TenantId; context is $($ctx.Tenant.Id)."
 
         }
 
-        Write-Ok "Signed in as $($ctx.Account.Id); subscription ${script}:SubscriptionId; region ${script}:Region."
+        Write-Ok "Signed in as $($ctx.Account.Id); subscription $script:SubscriptionId; region $script:Region."
 
     }
 
@@ -430,9 +430,9 @@ try {
 
         $rg = Get-AzResourceGroup -Name $script:ResourceGroupName -ErrorAction SilentlyContinue
 
-        if (-not $rg) { throw "Resource group '${script}:ResourceGroupName' not found. Stage 4 (Arc) creates it; run Stage 4 Register first." }
+        if (-not $rg) { throw "Resource group '$script:ResourceGroupName' not found. Stage 4 (Arc) creates it; run Stage 4 Register first." }
 
-        Write-Ok "Resource group present: ${script}:ResourceGroupName ($($rg.Location))"
+        Write-Ok "Resource group present: $script:ResourceGroupName ($($rg.Location))"
 
 
 
@@ -456,7 +456,7 @@ try {
 
             if ($gw.ResourceType -ne 'Microsoft.HybridCompute/gateways') { throw 'Configured ArcGatewayID is not a Microsoft.HybridCompute/gateways resource.' }
 
-            if ($gw.ResourceId -notmatch "^/subscriptions/$([regex]::Escape(${script}:SubscriptionId))/") {
+            if ($gw.ResourceId -notmatch "^/subscriptions/$([regex]::Escape($script:SubscriptionId))/") {
 
                 throw 'Arc Gateway must be in the Azure Local deployment subscription.'
 
@@ -464,7 +464,7 @@ try {
 
             $script:ArcGatewayID = $gw.ResourceId
 
-            Write-Ok "Arc Gateway validated: ${script}:ArcGatewayID"
+            Write-Ok "Arc Gateway validated: $script:ArcGatewayID"
 
         }
 
@@ -560,7 +560,7 @@ try {
 
         # A reimage changes system-assigned principal IDs while Arc resource IDs stay
         # stable. Azure forbids updating immutable role-assignment principal/scope fields.
-        $roleScope = "/subscriptions/$(${script}:SubscriptionId)/resourceGroups/$(${script}:ResourceGroupName)"
+        $roleScope = "/subscriptions/$($script:SubscriptionId)/resourceGroups/$($script:ResourceGroupName)"
         $existingManagedAssignments = @(Get-AzureLocalManagedRoleAssignments -ResourceGroupScope $roleScope)
         $currentPrincipalIds = @(Get-CurrentArcPrincipalIds -ArcResourceIds $arcIds)
         $potentialConflicts = @($existingManagedAssignments)
@@ -574,7 +574,7 @@ try {
             Write-Warn "Existing Azure Local managed role assignments detected: $($existingManagedAssignments.Count)."
             foreach ($assignment in $existingManagedAssignments) {
                 $classification = if ($potentialConflicts -contains $assignment) { 'potential-stale-conflict' } else { 'current-principal' }
-                Write-Warn "  ${classification}: $($assignment.RoleDefinitionName) / $($assignment.ObjectId) / $($assignment.RoleAssignmentId)"
+                Write-Warn ("  {0}: {1} / {2} / {3}" -f $classification, $assignment.RoleDefinitionName, $assignment.ObjectId, $assignment.RoleAssignmentId)
             }
         }
 
@@ -733,7 +733,7 @@ try {
 
                     $state = Invoke-Command @conn -ScriptBlock {
 
-                        $exe = "${env}:ProgramFiles\AzureConnectedMachineAgent\azcmagent.exe"
+                        $exe = "$env:ProgramFiles\AzureConnectedMachineAgent\azcmagent.exe"
 
                         $j = ((& $exe show -j 2>$null | Out-String) | ConvertFrom-Json)
 
@@ -806,13 +806,13 @@ try {
 
                     if ($script:TargetSolutionVersion -and $state.TargetSolutionSupported) {
 
-                        if ($state.Partner -notmatch "(?m)^\s*$([regex]::Escape(${script}:TargetSolutionVersion))\s*$") {
+                        if ($state.Partner -notmatch "(?m)^\s*$([regex]::Escape($script:TargetSolutionVersion))\s*$") {
 
-                            throw "Arc node $name lacks AzureLocal partner SolutionVersion ${script}:TargetSolutionVersion. Run Stage 4 Register."
+                            throw "Arc node $name lacks AzureLocal partner SolutionVersion $script:TargetSolutionVersion. Run Stage 4 Register."
 
                         }
 
-                        Write-Ok "Arc node composite readiness verified: $name (partner $(${script}:TargetSolutionVersion))"
+                        Write-Ok "Arc node composite readiness verified: $name (partner $($script:TargetSolutionVersion))"
 
                     }
 
@@ -846,7 +846,7 @@ try {
 
         if (-not $b.ContainsKey('LocalAdminPassword') -or $null -eq $script:LocalAdminPassword) {
 
-            ${script}:LocalAdminPassword = Read-Host -Prompt "Enter the local admin password for '${script}:LocalAdminUser' (exists on both nodes)" -AsSecureString
+            $script:LocalAdminPassword = Read-Host -Prompt "Enter the local admin password for '$script:LocalAdminUser' (exists on both nodes)" -AsSecureString
 
         }
 
@@ -1052,7 +1052,7 @@ try {
         $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
         [IO.File]::WriteAllText($script:runtimeParameterFile, $runtimeJson, $utf8NoBom)
 
-        Write-Info "Runtime ARM parameter file: ${script}:runtimeParameterFile"
+        Write-Info "Runtime ARM parameter file: $script:runtimeParameterFile"
         Write-Info "Runtime ARM parameter count: $($runtimeDoc.parameters.Count)"
         if ($runtimeDoc.parameters.Keys -contains 'dnsServers') {
             $dnsEntry = $runtimeDoc.parameters['dnsServers']
@@ -1077,7 +1077,7 @@ try {
         }
         Write-Info "Serialized dnsServers.value is an array; Count=$($serializedDns.Count)"
 
-        Write-Ok "Local admin '${script}:LocalAdminUser' credential prepared for injection (never logged)."
+        Write-Ok "Local admin '$script:LocalAdminUser' credential prepared for injection (never logged)."
 
         Write-Info 'If the template also requires a separate deployment/LCM credential, add it here.'
 
@@ -1134,7 +1134,7 @@ try {
         # 5.1 can break backtick-continued commands at blank lines and then emit
         # the misleading 'TemplateFile not supplied' dynamic-parameter error.
         if (-not (Test-Path -Path $script:TemplateFile -PathType Leaf)) {
-            throw "What-If template disappeared: ${script}:TemplateFile"
+            throw "What-If template disappeared: $script:TemplateFile"
         }
 
         $whatIfCommand = Get-Command Get-AzResourceGroupDeploymentWhatIfResult `
@@ -1145,7 +1145,7 @@ try {
         }
 
         if (-not (Test-Path -Path $script:runtimeParameterFile -PathType Leaf)) {
-            throw "Runtime ARM parameter file missing: ${script}:runtimeParameterFile"
+            throw "Runtime ARM parameter file missing: $script:runtimeParameterFile"
         }
 
         if ($script:DeploymentMode -eq 'Deploy') {
@@ -1155,9 +1155,9 @@ try {
             }
         }
 
-        Write-Info "What-If TemplateFile: ${script}:TemplateFile"
-        Write-Info "What-If Parameter Count: $(${script}:templateParameterObject.Count)"
-        Write-Info "What-If ARM deploymentMode: $(${script}:templateParameterObject['deploymentMode'])"
+        Write-Info "What-If TemplateFile: $script:TemplateFile"
+        Write-Info "What-If Parameter Count: $($script:templateParameterObject.Count)"
+        Write-Info "What-If ARM deploymentMode: $($script:templateParameterObject['deploymentMode'])"
 
         $whatIfArgs = @{
             ResourceGroupName       = $script:ResourceGroupName
