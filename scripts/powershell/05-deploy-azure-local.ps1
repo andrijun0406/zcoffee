@@ -1088,11 +1088,53 @@ try {
                 ForEach-Object { $_.Name }
         )
 
+        # Build the runtime document from the original parameter-file values first.
+        # This avoids serializing the intermediate ARM parameter-object wrappers.
         foreach ($key in $script:templateParameterObject.Keys) {
-            $rawValue = Unwrap-ArmParameterValue $script:templateParameterObject[$key]
+            $rawValue = $null
+            $hasSourceValue = $false
+
+            $sourceProp = $script:parameterFileObject.parameters.PSObject.Properties[$key]
+            if ($null -ne $sourceProp -and $null -ne $sourceProp.Value -and
+                ($sourceProp.Value.PSObject.Properties.Name -contains 'value')) {
+                $rawValue = $sourceProp.Value.value
+                $hasSourceValue = $true
+            }
+
+            # Runtime values take precedence over the source parameter file.
+            if ($key -eq 'localAdminUserName') {
+                $rawValue = $script:LocalAdminUser
+            }
+            elseif ($key -eq 'localAdminPassword') {
+                $rawValue = $script:LocalAdminPassword
+            }
+            elseif ($script:gatewayTemplateOverrides -and
+                    ($script:gatewayTemplateOverrides.Keys -contains $key)) {
+                $rawValue = $script:gatewayTemplateOverrides[$key]
+            }
+            elseif (-not $hasSourceValue) {
+                $rawValue = $script:templateParameterObject[$key]
+            }
+
+            $rawValue = Unwrap-ArmParameterValue $rawValue
 
             if ($arrayParameterNames -contains $key) {
-                $items = @($rawValue)
+                if ($null -eq $rawValue) {
+                    $items = @()
+                }
+                elseif (($rawValue -is [System.Collections.IDictionary]) -and
+                        (@($rawValue.Keys) -contains 'value') -and
+                        @($rawValue.Keys).Count -eq 1) {
+                    $items = @((Unwrap-ArmParameterValue $rawValue['value']))
+                }
+                elseif (($rawValue -is [System.Collections.IEnumerable]) -and
+                        -not ($rawValue -is [string])) {
+                    $items = @($rawValue)
+                }
+                else {
+                    $items = @($rawValue)
+                }
+
                 $arrayValue = New-Object object[] $items.Count
                 for ($i = 0; $i -lt $items.Count; $i++) {
                     $arrayValue[$i] = Unwrap-ArmParameterValue $items[$i]
