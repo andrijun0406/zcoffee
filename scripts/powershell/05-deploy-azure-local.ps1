@@ -263,7 +263,7 @@ function Get-CurrentArcPrincipalIds {
             }
         }
         catch {
-            Write-Warn "Could not resolve current Arc principal for ${arcId}: $($_.Exception.Message)"
+            Write-Warn ("Could not resolve current Arc principal for {0}: {1}" -f $arcId, $_.Exception.Message)
         }
     }
     return @($result)
