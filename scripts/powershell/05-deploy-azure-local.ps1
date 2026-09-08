@@ -1101,7 +1101,13 @@ try {
             }
 
             # Runtime values take precedence over the source parameter file.
-            if ($key -eq 'localAdminUserName') {
+            if ($key -eq 'deploymentMode') {
+                # The source parameter file defaults to Validate. The selected
+                # runtime mode must win in the generated file used by Validate,
+                # What-If, and Deploy.
+                $rawValue = [string]$DeploymentMode
+            }
+            elseif ($key -eq 'localAdminUserName') {
                 $rawValue = $script:LocalAdminUser
             }
             elseif ($key -eq 'localAdminPassword') {
