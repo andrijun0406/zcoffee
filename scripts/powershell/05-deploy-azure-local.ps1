@@ -1128,16 +1128,33 @@ try {
             }
         }
 
-        # Read the exact serialized representation with JavaScriptSerializer so
-        # validation does not rely on ConvertFrom-Json's one-item unrolling.
+        # Read the exact serialized representation with JavaScriptSerializer.
+        # JavaScriptSerializer may materialize a JSON array as object[], ArrayList,
+        # or another IEnumerable implementation; do not require System.Array.
         $serializedDoc = $serializer.DeserializeObject($runtimeJson)
         $serializedDns = $serializedDoc['parameters']['dnsServers']['value']
-        if ($serializedDns -is [string] -or
-            -not ($serializedDns -is [System.Array])) {
-            $serializedDnsType = if ($null -eq $serializedDns) { 'NULL' } else { $serializedDns.GetType().FullName }
-            throw ("Runtime ARM parameter file serialized dnsServers.value as {0}; expected JSON array." -f $serializedDnsType)
+        $serializedDnsType = if ($null -eq $serializedDns) { 'NULL' } else { $serializedDns.GetType().FullName }
+        $serializedDnsCount = if ($serializedDns -is [System.Collections.IEnumerable] -and
+                                   -not ($serializedDns -is [string]) -and
+                                   -not ($serializedDns -is [System.Collections.IDictionary])) {
+            @($serializedDns).Count
+        } else {
+            '-'
         }
-        Write-Info "Serialized dnsServers.value is an array; Count=$($serializedDns.Count)"
+        Write-Info ("Serialized dnsServers runtime type: {0}; Count={1}" -f $serializedDnsType, $serializedDnsCount)
+
+        if ($null -eq $serializedDns) {
+            throw 'Runtime ARM parameter file serialized dnsServers.value as NULL.'
+        }
+        if ($serializedDns -is [string]) {
+            throw 'Runtime ARM parameter file serialized dnsServers.value as a scalar string.'
+        }
+        if ($serializedDns -is [System.Collections.IDictionary]) {
+            throw ("Runtime ARM parameter file serialized dnsServers.value as an object ({0}), not an array." -f $serializedDnsType)
+        }
+        if (-not ($serializedDns -is [System.Collections.IEnumerable])) {
+            throw ("Runtime ARM parameter file serialized dnsServers.value as unexpected type: {0}" -f $serializedDnsType)
+        }
 
         Write-Ok "Local admin '$script:LocalAdminUser' credential prepared for injection (never logged)."
 
