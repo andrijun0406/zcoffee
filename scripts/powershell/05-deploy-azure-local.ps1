@@ -957,6 +957,8 @@ try {
 
 
         # Build one temporary ARM parameter file for Validate, What-If, and Deploy.
+        # v13: unwrap nested ARM value wrappers before serialization and preserve
+        # dictionary/object values without unary-comma wrapping.
         # v9: unwrap nested ARM value wrappers before serialization.
         # This keeps ARM array types (for example dnsServers) identical across all paths
         # and avoids Az.Resources TemplateParameterObject serialization differences.
@@ -967,34 +969,16 @@ try {
 
             if ($Value -is [System.Security.SecureString]) {
                 $bstr = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($Value)
-                try {
-                    return [Runtime.InteropServices.Marshal]::PtrToStringBSTR($bstr)
-                }
-                finally {
-                    [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($bstr)
-                }
+                try { return [Runtime.InteropServices.Marshal]::PtrToStringBSTR($bstr) }
+                finally { [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($bstr) }
             }
 
-            if ($Value -is [System.Collections.IDictionary]) {
-                $h = [ordered]@{}
-                foreach ($key in $Value.Keys) {
-                    $h[$key] = ConvertTo-ArmRuntimeValue $Value[$key]
-                }
-                return ,$h
-            }
-
-            if ($Value -is [pscustomobject]) {
-                $h = [ordered]@{}
-                foreach ($prop in $Value.PSObject.Properties) {
-                    $h[$prop.Name] = ConvertTo-ArmRuntimeValue $prop.Value
-                }
-                return ,$h
-            }
-
+            # Handle arrays/enumerables BEFORE PSCustomObject. In Windows PowerShell 5.1,
+            # inspecting an array through PSObject can otherwise turn it into a property
+            # dictionary, which ARM then receives as an object instead of an array.
             if (($Value -is [System.Collections.IEnumerable]) -and
-                -not ($Value -is [string])) {
-                # Return a real object[] atomically. This prevents Windows
-                # PowerShell 5.1 from unrolling one-item arrays.
+                -not ($Value -is [string]) -and
+                -not ($Value -is [System.Collections.IDictionary])) {
                 $items = New-Object System.Collections.ArrayList
                 foreach ($item in $Value) {
                     [void]$items.Add((ConvertTo-ArmRuntimeValue $item))
@@ -1002,9 +986,24 @@ try {
                 return ,([object[]]$items.ToArray())
             }
 
+            if ($Value -is [System.Collections.IDictionary]) {
+                $h = [ordered]@{}
+                foreach ($key in $Value.Keys) {
+                    $h[$key] = ConvertTo-ArmRuntimeValue $Value[$key]
+                }
+                return $h
+            }
+
+            if ($Value -is [pscustomobject]) {
+                $h = [ordered]@{}
+                foreach ($prop in $Value.PSObject.Properties) {
+                    $h[$prop.Name] = ConvertTo-ArmRuntimeValue $prop.Value
+                }
+                return $h
+            }
+
             return $Value
         }
-
 
         # Normalize ARM array parameters at the source boundary. PowerShell 5.1
         # can unwrap a one-item function result and can also preserve a JSON
@@ -1118,6 +1117,14 @@ try {
 
             $rawValue = Unwrap-ArmParameterValue $rawValue
 
+            if ($key -eq 'dnsServers') {
+                $rawType = if ($null -eq $rawValue) { 'NULL' } else { $rawValue.GetType().FullName }
+                $rawCount = if (($rawValue -is [System.Collections.IEnumerable]) -and
+                                -not ($rawValue -is [string]) -and
+                                -not ($rawValue -is [System.Collections.IDictionary])) { @($rawValue).Count } else { '-' }
+                Write-Info ("dnsServers after source unwrap: type={0}; Count={1}" -f $rawType, $rawCount)
+            }
+
             if ($arrayParameterNames -contains $key) {
                 if ($null -eq $rawValue) {
                     $items = @()
@@ -1143,6 +1150,13 @@ try {
             }
 
             $safeValue = ConvertTo-ArmRuntimeValue $rawValue
+            if ($key -eq 'dnsServers') {
+                $safeType = if ($null -eq $safeValue) { 'NULL' } else { $safeValue.GetType().FullName }
+                $safeCount = if (($safeValue -is [System.Collections.IEnumerable]) -and
+                                 -not ($safeValue -is [string]) -and
+                                 -not ($safeValue -is [System.Collections.IDictionary])) { @($safeValue).Count } else { '-' }
+                Write-Info ("dnsServers after runtime conversion: type={0}; Count={1}" -f $safeType, $safeCount)
+            }
             $runtimeDoc.parameters[$key] = [ordered]@{ value = $safeValue }
         }
 
@@ -1154,6 +1168,23 @@ try {
         $runtimeJson = $serializer.Serialize($runtimeDoc)
         $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
         [IO.File]::WriteAllText($script:runtimeParameterFile, $runtimeJson, $utf8NoBom)
+
+        # Persist a redacted copy for forensic review. The temporary runtime file
+        # contains the injected local-admin password and is removed in finally;
+        # this debug copy preserves the exact JSON shape without the secret.
+        $debugLogRoot = Join-Path $PSScriptRoot 'logs'
+        if (-not (Test-Path -Path $debugLogRoot -PathType Container)) {
+            New-Item -Path $debugLogRoot -ItemType Directory -Force | Out-Null
+        }
+        $debugRuntimeDoc = $serializer.DeserializeObject($runtimeJson)
+        if ($debugRuntimeDoc -and $debugRuntimeDoc['parameters'] -and
+            $debugRuntimeDoc['parameters']['localAdminPassword']) {
+            $debugRuntimeDoc['parameters']['localAdminPassword']['value'] = '<redacted>'
+        }
+        $debugRuntimePath = Join-Path $debugLogRoot 'runtime-arm-debug.json'
+        $debugJson = $serializer.Serialize($debugRuntimeDoc)
+        [IO.File]::WriteAllText($debugRuntimePath, $debugJson, $utf8NoBom)
+        Write-Info "Redacted runtime ARM debug file: $debugRuntimePath"
 
         Write-Info "Runtime ARM parameter file: $script:runtimeParameterFile"
         Write-Info "Runtime ARM parameter count: $($runtimeDoc.parameters.Count)"
