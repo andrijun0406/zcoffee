@@ -761,6 +761,9 @@ try {
             }
 
             if ($Value -is [System.Collections.IDictionary]) {
+                if (($Value.Keys -contains 'value') -and $Value.Keys.Count -eq 1) {
+                    return ConvertTo-ArmRuntimeValue $Value['value']
+                }
                 $h = [ordered]@{}
                 foreach ($key in $Value.Keys) {
                     $h[$key] = ConvertTo-ArmRuntimeValue $Value[$key]
@@ -778,35 +781,14 @@ try {
 
             if (($Value -is [System.Collections.IEnumerable]) -and
                 -not ($Value -is [string])) {
-                # Use ArrayList so a one-item collection remains a JSON array
-                # under Windows PowerShell 5.1 serialization.
-                $items = New-Object System.Collections.ArrayList
+                $items = @()
                 foreach ($item in $Value) {
-                    [void]$items.Add((ConvertTo-ArmRuntimeValue $item))
+                    $items += ,(ConvertTo-ArmRuntimeValue $item)
                 }
-                return $items
+                return ,$items
             }
 
             return $Value
-        }
-
-        # Normalize values according to the ARM template schema before writing JSON.
-        # This protects one-element arrays such as dnsServers from PowerShell 5.1
-        # scalar unrolling.
-        foreach ($meta in $script:templateJson.parameters.PSObject.Properties) {
-            if ([string]$meta.Value.type -ne 'array') { continue }
-            if (-not ($script:templateParameterObject.Keys -contains $meta.Name)) { continue }
-
-            $v = $script:templateParameterObject[$meta.Name]
-            if ($null -eq $v) {
-                $script:templateParameterObject[$meta.Name] = (New-Object System.Collections.ArrayList)
-            }
-            elseif ($v -is [string] -or
-                    -not ($v -is [System.Collections.IEnumerable])) {
-                $list = New-Object System.Collections.ArrayList
-                [void]$list.Add($v)
-                $script:templateParameterObject[$meta.Name] = $list
-            }
         }
 
         $runtimeDoc = [ordered]@{
@@ -823,42 +805,69 @@ try {
             parameters = [ordered]@{}
         }
 
+        # Normalize each ARM value before serialization. Some Windows PowerShell/Az
+        # conversion paths can leave an ARM entry wrapper ({ value = ... }) in the
+        # value bag. ARM needs the raw value, especially for one-item arrays such as
+        # dnsServers. Unwrap that container before writing the runtime parameter file.
+        $armArrayParameterNames = @()
+        foreach ($templateParameter in $script:templateJson.parameters.PSObject.Properties) {
+            if ($templateParameter.Value.type -eq 'array') {
+                $armArrayParameterNames += $templateParameter.Name
+            }
+        }
+
         foreach ($key in $script:templateParameterObject.Keys) {
-            $runtimeDoc.parameters[$key] = @{ value = ConvertTo-ArmRuntimeValue $script:templateParameterObject[$key] }
+            $rawValue = $script:templateParameterObject[$key]
+
+            if ($rawValue -is [System.Collections.IDictionary] -and
+                ($rawValue.Keys -contains 'value') -and
+                $rawValue.Keys.Count -eq 1) {
+                $rawValue = $rawValue['value']
+            }
+
+            # Force ARM array parameters to remain arrays even when they have one item.
+            if ($armArrayParameterNames -contains $key) {
+                if ($rawValue -is [System.Collections.IDictionary] -and
+                    ($rawValue.Keys -contains 'value') -and
+                    $rawValue.Keys.Count -eq 1) {
+                    $rawValue = $rawValue['value']
+                }
+                if ($rawValue -is [string] -or $null -eq $rawValue) {
+                    $rawValue = @($rawValue)
+                }
+                else {
+                    $rawValue = @($rawValue)
+                }
+            }
+
+            $runtimeDoc.parameters[$key] = [ordered]@{
+                value = ConvertTo-ArmRuntimeValue $rawValue
+            }
         }
 
         $runtimeParameterFileName = 'zcoffee-arm-parameters-{0}-{1}.json' -f `
             $script:DeploymentName, ([Guid]::NewGuid().ToString('N'))
         $script:runtimeParameterFile = Join-Path ([IO.Path]::GetTempPath()) $runtimeParameterFileName
-        Add-Type -AssemblyName System.Web.Extensions -ErrorAction Stop
-        $serializer = New-Object System.Web.Script.Serialization.JavaScriptSerializer
-        $runtimeJson = $serializer.Serialize($runtimeDoc)
+        $runtimeJson = $runtimeDoc | ConvertTo-Json -Depth 100
         $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
         [IO.File]::WriteAllText($script:runtimeParameterFile, $runtimeJson, $utf8NoBom)
 
         Write-Info "Runtime ARM parameter file: $script:runtimeParameterFile"
         Write-Info "Runtime ARM parameter count: $($runtimeDoc.parameters.Count)"
         if ($runtimeDoc.parameters.Keys -contains 'dnsServers') {
-            $dnsRuntime = $runtimeDoc.parameters['dnsServers'].value
+            $dnsRuntime = $runtimeDoc.parameters['dnsServers']['value']
             if ($null -ne $dnsRuntime) {
                 $dnsType = $dnsRuntime.GetType().FullName
-                $dnsCount = if ($dnsRuntime -is [System.Collections.ICollection]) { $dnsRuntime.Count } else { '-' }
+                $dnsCount = if ($dnsRuntime -is [Array]) { $dnsRuntime.Count } else { '-' }
                 Write-Info "Runtime dnsServers shape: $dnsType; Count=$dnsCount"
+                if (-not ($dnsRuntime -is [Array])) {
+                    throw 'Runtime dnsServers.value is not an array; refusing to continue.'
+                }
             }
             else {
                 Write-Warn 'Runtime dnsServers is NULL.'
             }
         }
-
-        # Read the exact serialized representation with JavaScriptSerializer so
-        # validation does not rely on ConvertFrom-Json's one-item unrolling.
-        $serializedDoc = $serializer.DeserializeObject($runtimeJson)
-        $serializedDns = $serializedDoc['parameters']['dnsServers']['value']
-        if ($serializedDns -is [string] -or
-            -not ($serializedDns -is [System.Collections.IList])) {
-            throw 'Runtime ARM parameter file serialized dnsServers.value as a scalar; refusing to continue.'
-        }
-        Write-Info "Serialized dnsServers.value is an array; Count=$($serializedDns.Count)"
 
         Write-Ok "Local admin '$script:LocalAdminUser' credential prepared for injection (never logged)."
 
