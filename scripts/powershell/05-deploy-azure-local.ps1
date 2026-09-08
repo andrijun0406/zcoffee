@@ -1166,6 +1166,13 @@ try {
             $runtimeDoc.parameters[$key] = [ordered]@{ value = $safeValue }
         }
 
+        # Final authoritative override: the source parameter file defaults to Validate,
+        # so enforce the operator-selected mode after the complete reconstruction pass.
+        if ($runtimeDoc.parameters.Keys -contains 'deploymentMode') {
+            $runtimeDoc.parameters['deploymentMode']['value'] = [string]$DeploymentMode
+            Write-Info ("Runtime deploymentMode value: {0}" -f $runtimeDoc.parameters['deploymentMode']['value'])
+        }
+
         $runtimeParameterFileName = 'zcoffee-arm-parameters-{0}-{1}.json' -f `
             $script:DeploymentName, ([Guid]::NewGuid().ToString('N'))
         $script:runtimeParameterFile = Join-Path ([IO.Path]::GetTempPath()) $runtimeParameterFileName
@@ -1191,6 +1198,7 @@ try {
         $debugJson = $serializer.Serialize($debugRuntimeDoc)
         [IO.File]::WriteAllText($debugRuntimePath, $debugJson, $utf8NoBom)
         Write-Info "Redacted runtime ARM debug file: $debugRuntimePath"
+        Write-Info ("Runtime debug deploymentMode value: {0}" -f $debugRuntimeDoc['parameters']['deploymentMode']['value'])
 
         Write-Info "Runtime ARM parameter file: $script:runtimeParameterFile"
         Write-Info "Runtime ARM parameter count: $($runtimeDoc.parameters.Count)"
