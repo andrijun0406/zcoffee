@@ -129,6 +129,7 @@ param(
 
 
 
+# ARM array types are normalized from the template definition before cmdlet invocation.
 Set-StrictMode -Version Latest
 
 $ErrorActionPreference = 'Stop'
@@ -691,7 +692,9 @@ try {
 
                 }
 
-                return $items
+                # Unary comma prevents PowerShell 5.1 from unrolling a
+                # one-element array (for example dnsServers) into a string.
+                return ,$items
 
             }
 
@@ -717,6 +720,49 @@ try {
 
         }
 
+        # Defensive ARM type normalization: PowerShell 5.1 can collapse a
+        # one-element array while values pass through helper functions. Use the
+        # template's declared type as the authority and preserve arrays explicitly.
+        foreach ($templateParameter in $script:templateJson.parameters.PSObject.Properties) {
+            $parameterName = [string]$templateParameter.Name
+            $parameterDefinition = $templateParameter.Value
+            if ($parameterDefinition.type -ne 'array') { continue }
+            if (-not $script:templateParameterObject.ContainsKey($parameterName)) { continue }
+
+            $arrayValue = $script:templateParameterObject[$parameterName]
+            if ($null -eq $arrayValue) {
+                $script:templateParameterObject[$parameterName] = [object[]]@()
+            }
+            elseif ($arrayValue -is [string]) {
+                $script:templateParameterObject[$parameterName] = [object[]]@([string]$arrayValue)
+            }
+            elseif (-not ($arrayValue -is [System.Array])) {
+                $script:templateParameterObject[$parameterName] = [object[]]@($arrayValue)
+            }
+            else {
+                $script:templateParameterObject[$parameterName] = [object[]]@($arrayValue)
+            }
+        }
+
+        # Safe diagnostics: log parameter names and runtime types only. Never log
+        # secure-string/plaintext values such as localAdminPassword.
+        Write-Info 'ARM parameter runtime types (values suppressed):'
+        foreach ($parameterName in ($script:templateParameterObject.Keys | Sort-Object)) {
+            $parameterValue = $script:templateParameterObject[$parameterName]
+            $parameterType = if ($null -eq $parameterValue) { 'NULL' } else { $parameterValue.GetType().FullName }
+            $parameterCount = if ($parameterValue -is [System.Array]) { $parameterValue.Count } else { '-' }
+            Write-Info ("  {0} => {1}; Count={2}" -f $parameterName, $parameterType, $parameterCount)
+        }
+
+        $dnsRuntime = $null
+        if ($script:templateParameterObject.ContainsKey('dnsServers')) {
+            $dnsRuntime = $script:templateParameterObject['dnsServers']
+            if (-not ($dnsRuntime -is [System.Array])) {
+                throw ("ARM parameter dnsServers was not normalized to an array; runtime type is {0}." -f $dnsRuntime.GetType().FullName)
+            }
+            Write-Info ("dnsServers normalized: type={0}; Count={1}" -f $dnsRuntime.GetType().FullName, $dnsRuntime.Count)
+        }
+
         $script:templateParameterObject['localAdminUserName'] = $script:LocalAdminUser
 
         $script:templateParameterObject['localAdminPassword'] = $script:LocalAdminPassword
@@ -731,6 +777,22 @@ try {
 
             }
 
+        }
+
+        # ARM array parameters must remain arrays even when they contain one item.
+        # This catches PowerShell 5.1 scalar unrolling before Azure sees the object.
+        $arrayParameterNames = @($script:templateJson.parameters.PSObject.Properties |
+            Where-Object { $_.Value.type -eq 'array' } |
+            ForEach-Object { $_.Name })
+        foreach ($arrayName in $arrayParameterNames) {
+            if ($script:templateParameterObject.ContainsKey($arrayName)) {
+                $arrayValue = $script:templateParameterObject[$arrayName]
+                if (($arrayValue -is [string]) -or
+                    -not ($arrayValue -is [System.Collections.IEnumerable])) {
+                    $script:templateParameterObject[$arrayName] = @($arrayValue)
+                    Write-Warn "Wrapped ARM array parameter '$arrayName' as an array."
+                }
+            }
         }
 
         Write-Ok "Local admin '$script:LocalAdminUser' credential prepared for injection (never logged)."
