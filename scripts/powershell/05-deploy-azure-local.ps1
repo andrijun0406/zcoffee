@@ -815,10 +815,16 @@ try {
 
         Write-Info "Runtime ARM parameter file: $script:runtimeParameterFile"
         Write-Info "Runtime ARM parameter count: $($runtimeDoc.parameters.Count)"
-        if ($runtimeDoc.parameters.Contains('dnsServers')) {
+        if ($runtimeDoc.parameters.ContainsKey('dnsServers')) {
             $dnsRuntime = $runtimeDoc.parameters['dnsServers'].value
-            $dnsCount = if ($dnsRuntime -is [Array]) { $dnsRuntime.Count } else { '-' }
-            Write-Info "Runtime dnsServers shape: $($dnsRuntime.GetType().FullName); Count=$dnsCount"
+            if ($null -ne $dnsRuntime) {
+                $dnsType = $dnsRuntime.GetType().FullName
+                $dnsCount = if ($dnsRuntime -is [Array]) { $dnsRuntime.Count } else { '-' }
+                Write-Info "Runtime dnsServers shape: $dnsType; Count=$dnsCount"
+            }
+            else {
+                Write-Warn 'Runtime dnsServers is NULL.'
+            }
         }
 
         Write-Ok "Local admin '$script:LocalAdminUser' credential prepared for injection (never logged)."
