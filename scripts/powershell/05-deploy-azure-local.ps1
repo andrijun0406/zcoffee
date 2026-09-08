@@ -129,6 +129,10 @@ param(
     # Explicitly continue despite potential stale managed assignments.
     [switch]$IgnoreExistingRoleAssignments,
 
+    # Allow an intentional rerun when a prior/partial Azure Local cluster object remains.
+    # This never deletes the cluster; it only changes the preflight from block to warning.
+    [switch]$IgnoreExistingDeploymentArtifacts,
+
     [switch]$UseGui
 
 )
@@ -177,6 +181,7 @@ if (-not $LocalAdminUser) { $LocalAdminUser = 'Administrator' }
 $script:authUser = $LocalAdminUser
 $script:CleanupExistingRoleAssignments = [bool]$CleanupExistingRoleAssignments
 $script:IgnoreExistingRoleAssignments = [bool]$IgnoreExistingRoleAssignments
+$script:IgnoreExistingDeploymentArtifacts = [bool]$IgnoreExistingDeploymentArtifacts
 if ($script:authUser -notmatch '[\\@]') { $script:authUser = ".\\$script:authUser" }
 
 $UseArcGateway     = [bool](Resolve-Setting -Name 'UseArcGateway' -Bound $b -Current ([bool]$UseArcGateway) -ConfigKey 'UseArcGateway' -Config $cfg)
@@ -261,11 +266,15 @@ function Get-CurrentArcPrincipalIds {
 function Get-AzureLocalManagedRoleAssignments {
     param([Parameter(Mandatory)][string]$ResourceGroupScope)
 
-    $all = @(Get-AzRoleAssignment -Scope $ResourceGroupScope -ErrorAction Stop)
-    return @($all | Where-Object {
-        $_.Scope -ieq $ResourceGroupScope -and
-        $_.RoleDefinitionName -in $script:azureLocalManagedRoleNames
-    })
+    # Query the RG scope once, then filter immediately in the pipeline. This keeps
+    # customer/resource-group RBAC outside the Azure Local managed-role set.
+    return @(
+        Get-AzRoleAssignment -Scope $ResourceGroupScope -ErrorAction Stop |
+            Where-Object {
+                $_.Scope -ieq $ResourceGroupScope -and
+                $_.RoleDefinitionName -in $script:azureLocalManagedRoleNames
+            }
+    )
 }
 
 function Remove-AzureLocalManagedRoleAssignments {
@@ -310,6 +319,23 @@ function Remove-AzureLocalManagedRoleAssignments {
     if ($pending.Count -gt 0) {
         throw "Timed out waiting for stale role-assignment deletion: $(($pending | ForEach-Object { $_.RoleAssignmentId }) -join '; ')"
     }
+
+    # REST GETs only prove the individual DELETE operations settled. Use the
+    # authoritative RBAC query to verify that the targeted assignments are gone.
+    $verifyScope = [string]$Assignments[0].Scope
+    $deletedIds = @($Assignments | ForEach-Object {
+        ([string]$_.RoleAssignmentId).ToLowerInvariant()
+    })
+    $remaining = @(
+        Get-AzureLocalManagedRoleAssignments -ResourceGroupScope $verifyScope |
+            Where-Object {
+                $deletedIds -contains ([string]$_.RoleAssignmentId).ToLowerInvariant()
+            }
+    )
+    if ($remaining.Count -gt 0) {
+        throw "RBAC still reports targeted role assignments after cleanup: $(($remaining | ForEach-Object { $_.RoleAssignmentId }) -join '; ')"
+    }
+    Write-Ok "Verified removal of $($Assignments.Count) targeted role assignments through Get-AzRoleAssignment."
 }
 
 try {
@@ -504,9 +530,15 @@ try {
 
 
         # Detect residue from prior failed deployments without deleting it automatically.
+        # A cluster object can represent a failed/recoverable deployment, so do not
+        # delete it here. Block by default, or require an explicit override to proceed.
         $clusterResidue = @(Get-AzResource -ResourceGroupName $script:ResourceGroupName -ResourceType 'Microsoft.AzureStackHCI/clusters' -ErrorAction SilentlyContinue)
         if ($clusterResidue.Count -gt 0) {
-            throw "Existing Azure Local cluster residue detected: $($clusterResidue.Name -join ', '). Use the supported decommission/cleanup path before a new deployment."
+            Write-Warn "Existing Azure Local cluster residue detected: $($clusterResidue.Name -join ', ')."
+            if (-not $script:IgnoreExistingDeploymentArtifacts) {
+                throw "Existing Azure Local cluster residue detected. Review/decommission it, or rerun with -IgnoreExistingDeploymentArtifacts for an intentional recovery attempt."
+            }
+            Write-Warn 'Continuing because -IgnoreExistingDeploymentArtifacts was supplied; no cluster resource was deleted.'
         }
 
         $residue = @(Get-AzResource -ResourceGroupName $script:ResourceGroupName -ErrorAction SilentlyContinue | Where-Object {
