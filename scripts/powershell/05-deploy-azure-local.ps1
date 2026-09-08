@@ -957,6 +957,7 @@ try {
 
 
         # Build one temporary ARM parameter file for Validate, What-If, and Deploy.
+        # v9: unwrap nested ARM value wrappers before serialization.
         # This keeps ARM array types (for example dnsServers) identical across all paths
         # and avoids Az.Resources TemplateParameterObject serialization differences.
         function ConvertTo-ArmRuntimeValue {
@@ -1005,22 +1006,49 @@ try {
         }
 
 
-        # Normalize values according to the ARM template schema before writing JSON.
-        # This protects one-element arrays such as dnsServers from PowerShell 5.1
-        # scalar unrolling.
+        # Normalize ARM array parameters at the source boundary. PowerShell 5.1
+        # can unwrap a one-item function result and can also preserve a JSON
+        # object wrapper as an OrderedDictionary. Rebuild each array directly
+        # from the raw parameter-file value as a real System.Object[].
         foreach ($meta in $script:templateJson.parameters.PSObject.Properties) {
             if ([string]$meta.Value.type -ne 'array') { continue }
             if (-not ($script:templateParameterObject.Keys -contains $meta.Name)) { continue }
 
+            $rawProp = $script:parameterFileObject.parameters.PSObject.Properties[$meta.Name]
+            $rawValue = $null
+            if ($null -ne $rawProp -and $rawProp.Value -and
+                ($rawProp.Value.PSObject.Properties.Name -contains 'value')) {
+                $rawValue = $rawProp.Value.value
+            }
+
+            # Prefer the raw JSON array when present. These are the authoritative
+            # values for dnsServers, dnsZones, intentList, storageNetworkList,
+            # physicalNodesSettings, and arcNodeResourceIds in this template.
+            if ($null -ne $rawValue) {
+                $rawItems = @($rawValue)
+                $arrayValue = New-Object object[] $rawItems.Count
+                for ($i = 0; $i -lt $rawItems.Count; $i++) {
+                    $arrayValue[$i] = $rawItems[$i]
+                }
+                $script:templateParameterObject[$meta.Name] = $arrayValue
+                continue
+            }
+
             $v = $script:templateParameterObject[$meta.Name]
             if ($null -eq $v) {
-                $script:templateParameterObject[$meta.Name] = (New-Object System.Collections.ArrayList)
+                $script:templateParameterObject[$meta.Name] = (New-Object object[] 0)
             }
             elseif ($v -is [string] -or
                     -not ($v -is [System.Collections.IEnumerable])) {
-                $list = New-Object System.Collections.ArrayList
-                [void]$list.Add($v)
-                $script:templateParameterObject[$meta.Name] = $list
+                $script:templateParameterObject[$meta.Name] = [object[]]@($v)
+            }
+            else {
+                $items = @($v)
+                $arrayValue = New-Object object[] $items.Count
+                for ($i = 0; $i -lt $items.Count; $i++) {
+                    $arrayValue[$i] = $items[$i]
+                }
+                $script:templateParameterObject[$meta.Name] = $arrayValue
             }
         }
 
@@ -1038,8 +1066,41 @@ try {
             parameters = [ordered]@{}
         }
 
+        # ARM parameter values can arrive as nested wrappers such as
+        # @{ value = @{ value = @('10.8.230.51') } }.  Unwrap only the
+        # parameter-value wrapper at this final boundary, then force every
+        # template-declared array to a real object[] before JSON serialization.
+        function Unwrap-ArmParameterValue {
+            param([AllowNull()][object]$Value)
+
+            while ($Value -is [System.Collections.IDictionary] -and
+                   @($Value.Keys).Count -eq 1 -and
+                   (@($Value.Keys) -contains 'value')) {
+                $Value = $Value['value']
+            }
+
+            return $Value
+        }
+
+        $arrayParameterNames = @(
+            $script:templateJson.parameters.PSObject.Properties |
+                Where-Object { [string]$_.Value.type -eq 'array' } |
+                ForEach-Object { $_.Name }
+        )
+
         foreach ($key in $script:templateParameterObject.Keys) {
-            $safeValue = ConvertTo-ArmRuntimeValue $script:templateParameterObject[$key]
+            $rawValue = Unwrap-ArmParameterValue $script:templateParameterObject[$key]
+
+            if ($arrayParameterNames -contains $key) {
+                $items = @($rawValue)
+                $arrayValue = New-Object object[] $items.Count
+                for ($i = 0; $i -lt $items.Count; $i++) {
+                    $arrayValue[$i] = Unwrap-ArmParameterValue $items[$i]
+                }
+                $rawValue = $arrayValue
+            }
+
+            $safeValue = ConvertTo-ArmRuntimeValue $rawValue
             $runtimeDoc.parameters[$key] = [ordered]@{ value = $safeValue }
         }
 
@@ -1073,7 +1134,8 @@ try {
         $serializedDns = $serializedDoc['parameters']['dnsServers']['value']
         if ($serializedDns -is [string] -or
             -not ($serializedDns -is [System.Array])) {
-            throw 'Runtime ARM parameter file serialized dnsServers.value as a scalar; refusing to continue.'
+            $serializedDnsType = if ($null -eq $serializedDns) { 'NULL' } else { $serializedDns.GetType().FullName }
+            throw ("Runtime ARM parameter file serialized dnsServers.value as {0}; expected JSON array." -f $serializedDnsType)
         }
         Write-Info "Serialized dnsServers.value is an array; Count=$($serializedDns.Count)"
 
