@@ -132,6 +132,7 @@ param(
 Set-StrictMode -Version Latest
 
 $ErrorActionPreference = 'Stop'
+$script:runtimeParameterFile = $null
 
 . (Join-Path $PSScriptRoot 'ui-common.ps1')
 
@@ -736,8 +737,35 @@ try {
         # The parameter file defaults deploymentMode to Validate. Override it at
         # runtime so Deploy mode cannot accidentally submit a validation deployment.
         if ($script:templateParameterObject.ContainsKey('deploymentMode')) {
+
             $script:templateParameterObject['deploymentMode'] = [string]$DeploymentMode
+
             Write-Info "ARM deploymentMode override: $DeploymentMode"
+
+        }
+
+        # What-If/New-AzResourceGroupDeployment can serialize a one-item array
+        # incorrectly when supplied through TemplateParameterObject on older
+        # Az.Resources builds. A temporary JSON parameter file preserves ARM
+        # arrays such as dnsServers exactly.
+        if ($DeploymentMode -eq 'Deploy') {
+            $runtimeDoc = [ordered]@{
+                '$schema' = 'https://schema.management.azure.com/schemas/2019-04-01/deploymentParameters.json#'
+                contentVersion = '1.0.0.0'
+                parameters = [ordered]@{}
+            }
+            foreach ($key in $script:templateParameterObject.Keys) {
+                $value = $script:templateParameterObject[$key]
+                if ($value -is [System.Security.SecureString]) {
+                    $bstr = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($value)
+                    try { $value = [Runtime.InteropServices.Marshal]::PtrToStringBSTR($bstr) }
+                    finally { [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($bstr) }
+                }
+                $runtimeDoc.parameters[$key] = @{ value = $value }
+            }
+            $script:runtimeParameterFile = Join-Path ([IO.Path]::GetTempPath()) ("zcoffee-arm-runtime-{0}.json" -f ([guid]::NewGuid().ToString('N')))
+            ($runtimeDoc | ConvertTo-Json -Depth 60) | Set-Content -Path $script:runtimeParameterFile -Encoding UTF8
+            Write-Info "Runtime ARM parameter file created for What-If/Deploy: $script:runtimeParameterFile"
         }
 
         Write-Ok "Local admin '$script:LocalAdminUser' credential prepared for injection (never logged)."
@@ -819,9 +847,9 @@ try {
         Write-Info "What-If ARM deploymentMode: $($script:templateParameterObject['deploymentMode'])"
 
         $whatIfArgs = @{
-            ResourceGroupName       = $script:ResourceGroupName
-            TemplateFile            = $script:TemplateFile
-            TemplateParameterObject = $script:templateParameterObject
+            ResourceGroupName      = $script:ResourceGroupName
+            TemplateFile           = $script:TemplateFile
+            TemplateParameterFile  = $script:runtimeParameterFile
             ErrorAction             = 'Stop'
         }
         $wi = Get-AzResourceGroupDeploymentWhatIfResult @whatIfArgs
@@ -843,11 +871,11 @@ try {
 
 
         $deploymentArgs = @{
-            ResourceGroupName       = $script:ResourceGroupName
-            Name                    = $script:DeploymentName
-            TemplateFile            = $script:TemplateFile
-            TemplateParameterObject = $script:templateParameterObject
-            ErrorAction             = 'Stop'
+            ResourceGroupName      = $script:ResourceGroupName
+            Name                   = $script:DeploymentName
+            TemplateFile           = $script:TemplateFile
+            TemplateParameterFile = $script:runtimeParameterFile
+            ErrorAction            = 'Stop'
         }
         $dep = New-AzResourceGroupDeployment @deploymentArgs
 
@@ -859,12 +887,20 @@ try {
 
 
 
+    if ($script:runtimeParameterFile -and (Test-Path -Path $script:runtimeParameterFile)) {
+        Remove-Item -Path $script:runtimeParameterFile -Force -ErrorAction SilentlyContinue
+        $script:runtimeParameterFile = $null
+    }
     Complete-Ui -FinalMessage 'ARM deployment submitted.'
 
 }
 
 catch {
 
+    if ($script:runtimeParameterFile -and (Test-Path -Path $script:runtimeParameterFile)) {
+        Remove-Item -Path $script:runtimeParameterFile -Force -ErrorAction SilentlyContinue
+        $script:runtimeParameterFile = $null
+    }
     Write-Err $_.Exception.Message
 
     Complete-Ui -Failed -FinalMessage 'Azure Local deployment stage failed.'
