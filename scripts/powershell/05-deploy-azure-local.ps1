@@ -132,7 +132,6 @@ param(
 Set-StrictMode -Version Latest
 
 $ErrorActionPreference = 'Stop'
-$script:runtimeParameterFile = $null
 
 . (Join-Path $PSScriptRoot 'ui-common.ps1')
 
@@ -143,6 +142,7 @@ $cfg = Import-LabConfig
 $b   = $PSBoundParameters
 
 $script:nodeCredential = $null
+$script:runtimeParameterFile = $null
 
 
 
@@ -737,35 +737,88 @@ try {
         # The parameter file defaults deploymentMode to Validate. Override it at
         # runtime so Deploy mode cannot accidentally submit a validation deployment.
         if ($script:templateParameterObject.ContainsKey('deploymentMode')) {
-
             $script:templateParameterObject['deploymentMode'] = [string]$DeploymentMode
-
             Write-Info "ARM deploymentMode override: $DeploymentMode"
-
         }
 
-        # What-If/New-AzResourceGroupDeployment can serialize a one-item array
-        # incorrectly when supplied through TemplateParameterObject on older
-        # Az.Resources builds. A temporary JSON parameter file preserves ARM
-        # arrays such as dnsServers exactly.
-        if ($DeploymentMode -eq 'Deploy') {
-            $runtimeDoc = [ordered]@{
-                '$schema' = 'https://schema.management.azure.com/schemas/2019-04-01/deploymentParameters.json#'
-                contentVersion = '1.0.0.0'
-                parameters = [ordered]@{}
-            }
-            foreach ($key in $script:templateParameterObject.Keys) {
-                $value = $script:templateParameterObject[$key]
-                if ($value -is [System.Security.SecureString]) {
-                    $bstr = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($value)
-                    try { $value = [Runtime.InteropServices.Marshal]::PtrToStringBSTR($bstr) }
-                    finally { [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($bstr) }
+
+        # Build one temporary ARM parameter file for Validate, What-If, and Deploy.
+        # This keeps ARM array types (for example dnsServers) identical across all paths
+        # and avoids Az.Resources TemplateParameterObject serialization differences.
+        function ConvertTo-ArmRuntimeValue {
+            param([AllowNull()][object]$Value)
+
+            if ($null -eq $Value) { return $null }
+
+            if ($Value -is [System.Security.SecureString]) {
+                $bstr = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($Value)
+                try {
+                    return [Runtime.InteropServices.Marshal]::PtrToStringBSTR($bstr)
                 }
-                $runtimeDoc.parameters[$key] = @{ value = $value }
+                finally {
+                    [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($bstr)
+                }
             }
-            $script:runtimeParameterFile = Join-Path ([IO.Path]::GetTempPath()) ("zcoffee-arm-runtime-{0}.json" -f ([guid]::NewGuid().ToString('N')))
-            ($runtimeDoc | ConvertTo-Json -Depth 60) | Set-Content -Path $script:runtimeParameterFile -Encoding UTF8
-            Write-Info "Runtime ARM parameter file created for What-If/Deploy: $script:runtimeParameterFile"
+
+            if ($Value -is [System.Collections.IDictionary]) {
+                $h = [ordered]@{}
+                foreach ($key in $Value.Keys) {
+                    $h[$key] = ConvertTo-ArmRuntimeValue $Value[$key]
+                }
+                return $h
+            }
+
+            if ($Value -is [pscustomobject]) {
+                $h = [ordered]@{}
+                foreach ($prop in $Value.PSObject.Properties) {
+                    $h[$prop.Name] = ConvertTo-ArmRuntimeValue $prop.Value
+                }
+                return $h
+            }
+
+            if (($Value -is [System.Collections.IEnumerable]) -and
+                -not ($Value -is [string])) {
+                $items = @()
+                foreach ($item in $Value) {
+                    $items += ,(ConvertTo-ArmRuntimeValue $item)
+                }
+                return ,$items
+            }
+
+            return $Value
+        }
+
+        $runtimeDoc = [ordered]@{
+            '$schema' = if ($script:parameterFileObject.PSObject.Properties.Name -contains '$schema') {
+                [string]$script:parameterFileObject.'$schema'
+            } else {
+                'https://schema.management.azure.com/schemas/2019-04-01/deploymentParameters.json#'
+            }
+            contentVersion = if ($script:parameterFileObject.PSObject.Properties.Name -contains 'contentVersion') {
+                [string]$script:parameterFileObject.contentVersion
+            } else {
+                '1.0.0.0'
+            }
+            parameters = [ordered]@{}
+        }
+
+        foreach ($key in $script:templateParameterObject.Keys) {
+            $runtimeDoc.parameters[$key] = @{ value = ConvertTo-ArmRuntimeValue $script:templateParameterObject[$key] }
+        }
+
+        $runtimeParameterFileName = 'zcoffee-arm-parameters-{0}-{1}.json' -f `
+            $script:DeploymentName, ([Guid]::NewGuid().ToString('N'))
+        $script:runtimeParameterFile = Join-Path ([IO.Path]::GetTempPath()) $runtimeParameterFileName
+        $runtimeJson = $runtimeDoc | ConvertTo-Json -Depth 100
+        $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+        [IO.File]::WriteAllText($script:runtimeParameterFile, $runtimeJson, $utf8NoBom)
+
+        Write-Info "Runtime ARM parameter file: $script:runtimeParameterFile"
+        Write-Info "Runtime ARM parameter count: $($runtimeDoc.parameters.Count)"
+        if ($runtimeDoc.parameters.Contains('dnsServers')) {
+            $dnsRuntime = $runtimeDoc.parameters['dnsServers'].value
+            $dnsCount = if ($dnsRuntime -is [Array]) { $dnsRuntime.Count } else { '-' }
+            Write-Info "Runtime dnsServers shape: $($dnsRuntime.GetType().FullName); Count=$dnsCount"
         }
 
         Write-Ok "Local admin '$script:LocalAdminUser' credential prepared for injection (never logged)."
@@ -785,7 +838,7 @@ try {
             $validationArgs = @{
                 ResourceGroupName       = $script:ResourceGroupName
                 TemplateFile            = $script:TemplateFile
-                TemplateParameterObject = $script:templateParameterObject
+                TemplateParameterFile   = $script:runtimeParameterFile
                 ErrorAction             = 'Stop'
             }
             $r = Test-AzResourceGroupDeployment @validationArgs 4>$null
@@ -831,8 +884,12 @@ try {
         $whatIfCommand = Get-Command Get-AzResourceGroupDeploymentWhatIfResult `
             -ErrorAction Stop
         if (-not $whatIfCommand.Parameters.ContainsKey('TemplateFile') -or
-            -not $whatIfCommand.Parameters.ContainsKey('TemplateParameterObject')) {
-            throw 'Installed Az.Resources What-If cmdlet does not support TemplateFile + TemplateParameterObject.'
+            -not $whatIfCommand.Parameters.ContainsKey('TemplateParameterFile')) {
+            throw 'Installed Az.Resources What-If cmdlet does not support TemplateFile + TemplateParameterFile.'
+        }
+
+        if (-not (Test-Path -Path $script:runtimeParameterFile -PathType Leaf)) {
+            throw "Runtime ARM parameter file missing: $script:runtimeParameterFile"
         }
 
         if ($script:DeploymentMode -eq 'Deploy') {
@@ -847,9 +904,9 @@ try {
         Write-Info "What-If ARM deploymentMode: $($script:templateParameterObject['deploymentMode'])"
 
         $whatIfArgs = @{
-            ResourceGroupName      = $script:ResourceGroupName
-            TemplateFile           = $script:TemplateFile
-            TemplateParameterFile  = $script:runtimeParameterFile
+            ResourceGroupName       = $script:ResourceGroupName
+            TemplateFile            = $script:TemplateFile
+            TemplateParameterFile   = $script:runtimeParameterFile
             ErrorAction             = 'Stop'
         }
         $wi = Get-AzResourceGroupDeploymentWhatIfResult @whatIfArgs
@@ -871,11 +928,11 @@ try {
 
 
         $deploymentArgs = @{
-            ResourceGroupName      = $script:ResourceGroupName
-            Name                   = $script:DeploymentName
-            TemplateFile           = $script:TemplateFile
-            TemplateParameterFile = $script:runtimeParameterFile
-            ErrorAction            = 'Stop'
+            ResourceGroupName       = $script:ResourceGroupName
+            Name                    = $script:DeploymentName
+            TemplateFile            = $script:TemplateFile
+            TemplateParameterFile   = $script:runtimeParameterFile
+            ErrorAction             = 'Stop'
         }
         $dep = New-AzResourceGroupDeployment @deploymentArgs
 
@@ -887,25 +944,25 @@ try {
 
 
 
-    if ($script:runtimeParameterFile -and (Test-Path -Path $script:runtimeParameterFile)) {
-        Remove-Item -Path $script:runtimeParameterFile -Force -ErrorAction SilentlyContinue
-        $script:runtimeParameterFile = $null
-    }
     Complete-Ui -FinalMessage 'ARM deployment submitted.'
 
 }
 
 catch {
 
-    if ($script:runtimeParameterFile -and (Test-Path -Path $script:runtimeParameterFile)) {
-        Remove-Item -Path $script:runtimeParameterFile -Force -ErrorAction SilentlyContinue
-        $script:runtimeParameterFile = $null
-    }
     Write-Err $_.Exception.Message
 
     Complete-Ui -Failed -FinalMessage 'Azure Local deployment stage failed.'
 
     throw
+
+}
+finally {
+
+    if ($script:runtimeParameterFile -and (Test-Path -Path $script:runtimeParameterFile -PathType Leaf)) {
+        Remove-Item -Path $script:runtimeParameterFile -Force -ErrorAction SilentlyContinue
+        $script:runtimeParameterFile = $null
+    }
 
 }
 
