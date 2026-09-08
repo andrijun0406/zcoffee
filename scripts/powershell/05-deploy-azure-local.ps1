@@ -251,9 +251,15 @@ function Get-CurrentArcPrincipalIds {
         try {
             $response = Invoke-AzRestMethod -Method GET -Path $path -ErrorAction Stop
             $doc = $response.Content | ConvertFrom-Json
-            $principal = [string]$doc.identity.principalId
-            if (-not [string]::IsNullOrWhiteSpace($principal)) {
-                $result += $principal
+            # Arc machine identity can be transiently absent immediately after
+            # registration. Treat a partially hydrated resource as unresolved,
+            # not as a null-reference failure.
+            $identity = $doc.identity
+            if ($null -ne $identity) {
+                $principal = [string]$identity.principalId
+                if (-not [string]::IsNullOrWhiteSpace($principal)) {
+                    $result += $principal
+                }
             }
         }
         catch {
@@ -542,7 +548,11 @@ try {
         }
 
         $residue = @(Get-AzResource -ResourceGroupName $script:ResourceGroupName -ErrorAction SilentlyContinue | Where-Object {
-            $_.ResourceType -in @('Microsoft.KeyVault/vaults','Microsoft.Storage/storageAccounts')
+            $_.ResourceType -in @(
+                'Microsoft.KeyVault/vaults',
+                'Microsoft.Storage/storageAccounts',
+                'Microsoft.Resources/deployments'
+            )
         })
         if ($residue.Count -gt 0) {
             Write-Warn "Existing deployment artifacts detected and may be reused: $($residue.Name -join ', ')."
@@ -581,6 +591,15 @@ try {
                 Write-Warn 'Continuing despite potential stale role assignments because -IgnoreExistingRoleAssignments was supplied.'
             }
             else {
+                # Preserve an operator-reviewable record before blocking. This is
+                # intentionally non-secret RBAC metadata only.
+                $logDir = Join-Path $PSScriptRoot 'logs'
+                New-Item -Path $logDir -ItemType Directory -Force | Out-Null
+                $conflictCsv = Join-Path $logDir 'stale-role-assignments.csv'
+                $potentialConflicts |
+                    Select-Object RoleAssignmentId, ObjectId, RoleDefinitionName, Scope |
+                    Export-Csv -Path $conflictCsv -NoTypeInformation
+                Write-Warn "Detected conflicts exported to: $conflictCsv"
                 $summary = ($potentialConflicts | ForEach-Object { "$($_.RoleDefinitionName) [$($_.ObjectId)]" }) -join '; '
                 throw "Potential stale Azure Local role assignments may cause RoleAssignmentUpdateNotPermitted: $summary. Use -CleanupExistingRoleAssignments for explicit lab cleanup or -IgnoreExistingRoleAssignments to proceed without deletion."
             }
