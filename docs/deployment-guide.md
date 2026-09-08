@@ -49,6 +49,22 @@ assignments to `azljkt01rg` once it exists.
 
 ---
 
+## Current validated 2608 path
+
+The latest verified path uses the Microsoft Azure Portal 2608 image `AzureLocal24H2.26100.32230.LCM.12.2608.0.3020.x64.en-us.iso`. The embedded WIM reports OS build `26100.33296`; the image also contains Azure Local SBE/LCM payload `10.2608.1003.2003`. It does not populate the Dell `C:\SBE` staging directory, so ZCOFFEE stages the Dell AX-15G SBE bundle before Arc registration.
+
+The Dell bundle used in the lab is `SBE_Dell_AX-15G_5.0.2606.1510` with its discovery XML and ZIP payload. This is an AX-650-equivalent lab experiment on PowerEdge R650 hardware, not a Dell-supported R650 deployment.
+
+The validated pre-deployment gates are:
+
+* OS deployment on both nodes.
+* Combined Stage 2+3 network and readiness validation.
+* SBE staging and verification on both nodes.
+* Stage 4 Arc registration and gateway association.
+* Stage 5 ARM Validate.
+
+Only Stage 5 Deploy remains before Stage 6 cluster validation.
+
 ## Pre-deployment
 - Register Partner Admin Link (PAL) for Azure solutions.
 - Cabling: **25GbE back-to-back** for storage (`SLOT 2 Port 1/2`, QLogic QL41262); **QL41232 rNDC**
@@ -122,47 +138,63 @@ safe repairs (enable w32time, install a missing feature/module).
 
 ---
 
-## Stage 4 — Azure Arc registration
-Prereq: `Install-Module Az.Accounts, Az.Resources -Scope CurrentUser` on the runner.
+## SBE staging
+
+Stage 3 reports whether `C:\SBE` exists, but the dedicated `stage-sbe.ps1` gate is the authoritative staging operation. It accepts a local jump-host source first and can be extended with a direct HTTPS download source.
+
 ```powershell
-# read-only prerequisite check:
-.\bootstrap-cluster.ps1 -Stage 04-register-arc -ArcMode Validate `
-  -SubscriptionId <sub> -TenantId <tenant> -Region southeastasia -ConfigureTrustedHosts -Transport HTTP
-# actual onboarding (reboots nodes during agent phase) - interactive login:
-.\bootstrap-cluster.ps1 -Stage 04-register-arc -ArcMode Register -Apply -UseExistingAzLogin `
-  -SubscriptionId <sub> -TenantId <tenant> -Region southeastasia -ConfigureTrustedHosts -Transport HTTP
-# unattended (service principal) - drop -UseExistingAzLogin; SP takes precedence:
-$spSecret = Read-Host 'SP secret' -AsSecureString
-.\bootstrap-cluster.ps1 -Stage 04-register-arc -ArcMode Register -Apply `
-  -SubscriptionId <sub> -TenantId <tenant> -Region southeastasia `
-  -ServicePrincipalId <appId> -ServicePrincipalSecret $spSecret `
-  -ConfigureTrustedHosts -Transport HTTP
+.\stage-sbe.ps1 `
+  -NodeIPs '10.8.230.232','10.8.230.235' `
+  -SbeSourcePath 'C:\zcoffee\sbe\AX650-2606\contents' `
+  -Apply `
+  -ReplaceRemoteSbe
 ```
-Auth note: `-UseExistingAzLogin` alone reuses the interactive session; passing `-ServicePrincipalId`
-+ `-ServicePrincipalSecret` (or `-ServicePrincipalCertThumbprint`) makes it fully unattended.
-Registers providers, ensures the RG, acquires tokens on the runner, creates or reuses the Arc Gateway when enabled, then runs
-`Invoke-AzStackHciArcInitialization` per node over WinRM with `-ArcGatewayID` and `-TargetSolutionVersion`. Gate for Stage 5: every node is `Connected`, uses gateway mode when enabled, and reports the configured Azure Local partner `SolutionVersion`.
+
+The expected contents are two XML manifests and one ZIP payload. ZCOFFEE copies and verifies these files; Azure Local/LCM applies the SBE during Stage 5 deployment. Do not treat Azure Update Manager as the initial deployment mechanism.
+
+## Stage 4 — Azure Arc registration
+Prereq: `Az.Accounts`, `Az.Resources`, and the node-side `AzSHCI.ARCInstaller`. Register mode installs missing node modules.
+
+```powershell
+$gwId = (Get-Content .\config\arc-gateway.local.json -Raw | ConvertFrom-Json).resourceId
+
+# idempotent validation/association using the existing Azure context:
+.\04-register-arc.ps1 -Mode Register -Apply `
+  -NodeIPs '10.8.230.232','10.8.230.235' `
+  -SubscriptionId $sub -TenantId $tenant `
+  -AccountId '7d1ef683-a16c-4079-abb2-3038ba77ffbe' `
+  -UseArcGateway -ArcGatewayID $gwId -UseExistingAzLogin
+```
+
+Stage 4 creates or reuses the Arc Gateway, stages the node-side registration modules, associates existing machines through the supported settings endpoint, and verifies exact Arc status plus gateway mode. The installed `AzSHCI.ARCInstaller 1.2408.0.3053` does not expose `TargetSolutionVersion`; partner metadata is therefore diagnostic rather than a hard gate in this lab. The operational gate for Stage 5 is: every node is Azure-side `Connected`, local `azcmagent` status is exactly `Connected`, and gateway mode is `gateway` when enabled.
 
 ---
 
 ## Stage 5 — Azure Local deployment (ARM)
-Uses Az PowerShell (reuses Stage 4 login). Pre-flight gates: RG exists, both Arc nodes Connected,
-`arcNodeResourceIds` resolve, adapter names match config, secrets not committed. Validate is default;
-Deploy needs `-DeploymentMode Deploy -EnableDeployment` and a typed `DEPLOY`.
+Uses Az PowerShell and the validated ODIN template/parameter pair. Pre-flight gates include the resource group, Arc machine IDs, exact adapter names, gateway association, SBE staged under `C:\SBE`, and runtime secret injection. `Validate` is non-mutating; Deploy requires `-DeploymentMode Deploy -EnableDeployment` and a typed `DEPLOY`.
+
 ```powershell
-.\bootstrap-cluster.ps1 -Stage 05-deploy-azure-local `
-  -SubscriptionId <sub> -TenantId <tenant> -Region southeastasia `
-  -TemplateFile ..\arm-templates\azuredeploy.json `
-  -ParameterFile ..\arm-templates\ODIN-parameters.json -UseExistingAzLogin
-# unattended deploy (service principal):
-.\bootstrap-cluster.ps1 -Stage 05-deploy-azure-local -DeploymentMode Deploy -EnableDeployment `
-  -SubscriptionId <sub> -TenantId <tenant> -Region southeastasia `
-  -ServicePrincipalId <appId> -ServicePrincipalSecret $spSecret `
-  -TemplateFile ..\arm-templates\azuredeploy.json -ParameterFile ..\arm-templates\ODIN-parameters.json
+$template = (Resolve-Path ..\arm-templates\odin-template.json).Path
+$params   = (Resolve-Path ..\arm-templates\odin-parameters.json).Path
+$gwId     = (Get-Content .\config\arc-gateway.local.json -Raw | ConvertFrom-Json).resourceId
+
+# non-mutating ARM validation:
+.\05-deploy-azure-local.ps1 -DeploymentMode Validate `
+  -SubscriptionId $sub -TenantId $tenant -ResourceGroupName 'azljkt01rg' `
+  -TemplateFile $template -ParameterFile $params `
+  -UseArcGateway -ArcGatewayID $gwId -UseExistingAzLogin `
+  -LocalAdminUser 'Administrator' -LocalAdminPassword $cred.Password
+
+# real deployment after Validate and What-If review:
+.\05-deploy-azure-local.ps1 -DeploymentMode Deploy -EnableDeployment `
+  -SubscriptionId $sub -TenantId $tenant -ResourceGroupName 'azljkt01rg' `
+  -TemplateFile $template -ParameterFile $params `
+  -UseArcGateway -ArcGatewayID $gwId -UseExistingAzLogin `
+  -LocalAdminUser 'Administrator' -LocalAdminPassword $cred.Password `
+  -DeploymentName 'azljkt01dep2608'
 ```
-`localAdminUserName`/`localAdminPassword` are injected as runtime overrides (prompted); the param file
-keeps placeholders. `TargetSolutionVersion` is resolved from `lab-config.psd1`; Stage 5 also verifies the
-Azure Local partner metadata over WinRM before ARM validation or deployment. Needs the Microsoft/Dell-provided `azuredeploy.json` template in `arm-templates/`.
+
+The script uses `TemplateParameterObject`, preserves single-item arrays such as `dnsServers`, and injects the local admin password only at runtime. It does not inject unsupported Arc Gateway parameters into the current template; Stage 4 association is authoritative for gateway use.
 
 ---
 
@@ -178,35 +210,3 @@ Confirms cluster object, node membership/state, quorum (Cloud Witness), and S2D 
 - Apply SBE packages via LCM; manage with Dell OpenManage Integration for Windows Admin Center.
 - Delete `C:\Windows\Panther\unattend.xml` on each node (contains the obfuscated admin password).
 - Keep credentials, tenant/subscription IDs, and firmware versions in the private runbook.
-
-
-### Recovering a Connected node with missing Azure Local partner metadata
-
-Do not delete the resource group or the shared Arc Gateway. The targeted recovery removes only the affected Arc machine and its Azure Edge extensions, disconnects its local agent, and re-registers it with the existing gateway and target solution version.
-
-For the Jakarta 01 node 2 case:
-
-```powershell
-.\repair-arc-node.ps1 `
-  -NodeName 'azljkt01n2' `
-  -NodeIP '10.8.230.235' `
-  -ResourceGroupName 'azljkt01rg' `
-  -SubscriptionId $sub `
-  -TenantId $tenant `
-  -TargetSolutionVersion '12.2604.1003' `
-  -ArcGatewayID $gwId `
-  -UseExistingAzLogin
-```
-
-The helper requires an explicit `YES` confirmation unless `-AutoApprove` is supplied. After completion, verify:
-
-```powershell
-Invoke-Command 10.8.230.235 -Credential $cred -ScriptBlock {
-  $e = "$env:ProgramFiles\AzureConnectedMachineAgent\azcmagent.exe"
-  & $e partnerconfig get SolutionVersion --partner AzureLocal
-  & $e config get connection.type
-  ((& $e show -j 2>$null | Out-String) | ConvertFrom-Json).status
-}
-```
-
-Expected output is the configured solution version, `gateway`, and `Connected`. Run Stage 4 Validate and Stage 5 Validate again before any deployment submission.

@@ -28,30 +28,32 @@ Workflow: edit on PC -> commit/push in VS Code -> `git pull` on jump host.
   Roles: Azure Connected Machine Onboarding, Resource Administrator, Contributor, User Access Administrator.
 - Jump host 10.8.230.221 (Server Core): RACADM installed, Az.Accounts/Az.Resources, oscdimg (ADK), NO PowerShell in Setup WinPE.
 
-## Progress state (as of this handoff)
-- Stage 0 (create SP): DONE - cert SP created, roles assigned, sp-credentials.local.json written.
-- Stage 1 (deploy OS): DONE + hands-off. Slipstream ISO (make-golden-with-unattend.ps1) with:
-  WMIC/cmd/diskpart BOSS auto-select (bootselect.cmd, no PowerShell) + $OEM$/SetupComplete.cmd/netbootstrap.ps1
-  post-install network bake (hostname, VLAN 230, static IP, WinRM, RDP) keyed by service tag + MAC.
-- Stage 2 (network validate): PASS both nodes (storage 25GbE up after DC cabling; media-state check fixed).
-- Stage 3 (node readiness + Env Checker): PASS both nodes.
-- Stage 4 (Arc register): DONE - both nodes Status=Connected, gateway-enabled, and Azure Local partner metadata verified.
-  Resource ids: /subscriptions/859c.../resourceGroups/azljkt01rg/providers/Microsoft.HybridCompute/machines/azljkt01n1 (and .../azljkt01n2)
-- Stage 5 (cloud deploy): ARM Validate passed; deployment rejected by Azure because the installed OS/solution eligibility was unsupported for the selected deployment.
-- Stage 6 (validate cluster): NOT RUN.
+## Progress state (as of 2026-09-07)
 
-## OPEN ITEMS for the fresh session
-1. Arc Gateway: implemented. Stage 4 creates/reuses the gateway, persists its resource ID, associates existing machines, and passes `ArcGatewayID` to fresh registration.
-2. Node FQDN: nodes are WORKGROUP (Local Identity) so FQDN is not azljkt01n1.zcoffee.com. If desired,
-   network-bake specialize should set primary DNS suffix (NV Domain / Domain = zcoffee.com).
-3. Stage 5 ARM template azuredeploy.json still required (from Dell/Microsoft Azure Local deploy package).
-4. Credential store: DPAPI node-admin secret (Get-/Set-LabNodeCredential in ui-common.ps1) - captured in
-   Stage 0, reused by Stages 2/3/4 so no repeated WinRM prompts. Verify wired on jump host.
-5. Orchestrator (deploy-all.ps1): chains 0->6, Wait-NodeReady between reboots, gates on Arc-Connected,
-   -AutoApprove for irreversible steps. Validate manually stage-by-stage before trusting it.
-6. Add ZCOFFEE banner (banner.ps1 / Show-ZcoffeeBanner) to orchestrator + stage 0.
+* Stage 0: DONE. Certificate service principal created; roles assigned; credentials stored locally.
+* Stage 1: PASS on both nodes using the Azure Portal 2608 ISO. Embedded WIM build is `26100.33296`; post-install network bake completed for both nodes.
+* Stage 2+3: PASS through the combined validation wrapper. Management and storage links are up; Hyper-V, Failover Clustering, DCB, TPM, Secure Boot, egress, and Environment Checker gates passed.
+* SBE staging: PASS. Dell AX-15G `5.0.2606.1510` manifests and payload staged to `C:\SBE` on both nodes.
+* Stage 4: PASS and idempotent. Both Arc machines are `Connected`, use `connection.type=gateway`, and are associated with `zcoffee-arcgw`.
+* Stage 5 Validate: PASS. ARM parameter conversion, array preservation, secure runtime password injection, and template validation all pass.
+* Stage 5 Deploy: NOT RUN. This is the next irreversible action.
+* Stage 6: NOT RUN; depends on successful cluster deployment and convergence.
 
+The installed `AzSHCI.ARCInstaller` is `1.2408.0.3053` and does not expose `TargetSolutionVersion`. Stage 4 and Stage 5 therefore treat partner metadata as diagnostic and require operational Arc postconditions instead: exact Arc status `Connected`, gateway mode when enabled, and Azure-side machine verification.
+## OPEN ITEMS for the next session
+
+1. Submit Stage 5 Deploy only after reviewing the What-If output; use a new deployment name such as `azljkt01dep2608`.
+2. Monitor deployment until `Succeeded`; run Stage 6 only after cluster, quorum, and S2D converge.
+3. Add and test the destructive lab teardown workflow (`07-dismantle-lab.ps1`) with PlanOnly and explicit confirmation.
+4. Keep SBE staging in the orchestrated path so Microsoft and Dell image sources behave consistently.
+5. Update the orchestrator only after the individual Stage 5 Deploy and Stage 6 runs succeed.
+6. Preserve the Arc Gateway for rebuilds unless the specific test is gateway auto-creation.
 ## Hard-won lessons (do NOT re-learn these)
+- Microsoft 2608 ISO provides the OS/SBE image baseline but does not populate Dell `C:\SBE`; stage the Dell bundle before deployment.
+- SBE staging is pre-deployment; Azure Local/LCM applies it during Stage 5, while Azure Update Manager is post-deployment servicing.
+- Stage 4 success is based on node/Azure postconditions, not a clean initializer return; `Trace-Execution` can occur after successful Arc resource creation.
+- The old installer lacks `TargetSolutionVersion`; do not make unsupported partner metadata a hard gate.
+- Windows PowerShell 5.1 unwraps single-item arrays and has fragile backtick continuation; use unary-comma array preservation and splatted cmdlet arguments.
 - Azure Local Setup WinPE has NO powershell.exe and NO findstr - boot-disk logic MUST be cmd/wmic/diskpart.
 - A 2nd RFS image (RFS2) breaks golden-ISO boot on this firmware - use single RFS + slipstreamed Autounattend.xml.
 - unattend RunSynchronousCommand <Path> has a ~259-char limit - never embed base64 -EncodedCommand; stage a file.
@@ -76,10 +78,3 @@ Workflow: edit on PC -> commit/push in VS Code -> `git pull` on jump host.
 - deployment-journey.md: chronological history/state narrative (what happened, in order).
 - deployment-guide.md: detailed runbook - every stage, every parameter explained.
 - deployment-handoff.md: THIS file - the master prompt to resume.
-
-
-## Partner metadata lesson
-
-`Connected` is not a sufficient Stage 4 success condition. Azure Local eligibility also depends on the Azure Local partner registration. The current scripts require `TargetSolutionVersion` and verify `azcmagent partnerconfig get SolutionVersion --partner AzureLocal` on every node. A missing partner returns `Unknown partner: azurelocal` and blocks Stage 5.
-
-For a single affected node, preserve the shared gateway and healthy nodes, remove only the affected Arc machine/extensions, disconnect its local agent with `--force-local-only`, and use `repair-arc-node.ps1` to re-register it.

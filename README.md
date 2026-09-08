@@ -3,23 +3,26 @@
 
 ## Current status (Jakarta 01)
 
-| Stage | State |
-|---|---|
-| 1 Deploy OS | Confirmed hands-off (WMIC BOSS auto-select + MAC network bake on .232/.235) |
-| 2 Network validate | PASS - mgmt + storage 25GbE links up |
-| 3 Node readiness | PASS both nodes (Secure Boot on, SBE staged, egress 4/4, Env Checker green) |
-| 4 Arc register | Gateway + partner metadata verified |
-| 5 Cloud deploy | Blocked by node OS/solution eligibility; ARM Validate passed |
-| 6 Validate cluster | Pending |
+As of 2026-09-07, the clean Azure Local 2608 pre-deployment path is verified through ARM validation:
 
-Azure auth for Stages 4-5 supports a **service principal** (unattended). See the deployment guide's
-"Service principal" section for creation + roles.
+| Gate | State |
+|---|---|
+| OS deployment | PASS on both nodes using the Azure Portal 2608 ISO; WIM build `26100.33296` |
+| Network/readiness | PASS via combined Stage 2+3 wrapper |
+| Dell SBE | PASS; `SBE_Dell_AX-15G_5.0.2606.1510.xml`, discovery manifest, and ZIP staged to `C:\SBE` on both nodes |
+| Arc registration | PASS and idempotent; both nodes `Connected` and `connection.type=gateway` |
+| Arc Gateway | PASS; existing `zcoffee-arcgw` reused and associated with both nodes |
+| Stage 5 Validate | PASS; ARM template validation completed without creating Azure Local |
+| Stage 5 Deploy | NOT RUN; next irreversible gate |
+| Stage 6 Cluster validation | Pending Stage 5 deployment |
+
+The current deployment uses the ODIN template/parameter pair in `arm-templates/`. The template has no native Arc Gateway parameters, so Stage 4 associates the Arc machines with the gateway before Stage 5.
 ## Overview
 Automation scripts and documentation to deploy a **2-node switchless Azure Local 24H2 cluster**
 (Storage Spaces Direct, Hyper-V, Local Identity + Key Vault) on **Dell PowerEdge R650** over a
 Sangfor VPN / jump-host connection to the datacenter.
 
-The framework is a **six-stage, config-driven** workflow. Every value lives once in
+The framework is a **six-stage, config-driven** workflow; the pre-deployment path can be operated as four gates by treating Stage 2+3 as one validation gate and Stage 6 as post-deployment. Every value lives once in
 `scripts/powershell/config/lab-config.psd1` (the single source of truth); every stage reads it,
 and any parameter can override it per run.
 
@@ -77,6 +80,20 @@ zcoffee/
    |- arm-templates/                # ODIN params (gitignored real) + sanitized example
 ```
 
+## Current validated workflow
+
+For a fresh demo rebuild, use this sequence:
+
+* Build or obtain the Azure Local 2608 unattended ISO.
+* Reimage both nodes in parallel from the jump host; one concurrent HTTP server is sufficient for both iDRACs.
+* Run `02-03-validate-nodes.ps1` in validation mode.
+* Stage the Dell SBE bundle with `stage-sbe.ps1` when the image does not populate `C:\SBE`.
+* Run Stage 4 Register with the existing or auto-created Arc Gateway.
+* Run Stage 5 Validate; only then submit Stage 5 Deploy.
+* Run Stage 6 after the cluster converges.
+
+SBE staging is a pre-deployment input. Azure Local/LCM applies it during deployment; Azure Update Manager is for post-deployment servicing.
+
 ## Quickstart
 1. Clone the repo and populate `scripts/powershell/config/lab-config.psd1`.
 2. Put the Dell golden ISO under `isos/` (gitignored; never committed).
@@ -98,10 +115,3 @@ zcoffee/
 - No credentials, tenant IDs, subscription IDs, or ISOs in the repo.
 - Real ARM parameters (`arm-templates/ODIN-parameters.json`) are gitignored.
 - The local Administrator password lives in the private runbook only.
-
-
-## Arc Gateway readiness
-
-Stage 4 creates or reuses the configured Arc Gateway and persists its resource ID in `config/arc-gateway.local.json`. Before Stage 5, every node must satisfy the composite gate: `azcmagent` status `Connected`, `connection.type` `gateway` when enabled, and Azure Local partner `SolutionVersion` equal to `TargetSolutionVersion` in `lab-config.psd1`.
-
-A machine that is merely Arc `Connected` is not sufficient. Use `repair-arc-node.ps1` for targeted recovery when a node lacks Azure Local partner metadata; preserve the shared gateway and healthy nodes.

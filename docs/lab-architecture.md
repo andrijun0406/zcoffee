@@ -51,8 +51,13 @@ Pattern `azl<location><instance><role>`, lowercase, **no hyphens** in DNS/Azure 
 - Adapter names must match reality exactly (including spaces) or Stage 5 Network ATC fails.
 
 
-## Arc Gateway and Azure Local partner registration
+## Current software/deployment baseline
 
-The lab uses one public Arc Gateway, `zcoffee-arcgw`, in the Azure Local resource group. Its resource ID is persisted locally in `config/arc-gateway.local.json` and must be reused after node reimage when the subscription and resource group remain unchanged.
+* Azure Local image: Microsoft Portal 2608 ISO; embedded WIM build `26100.33296`.
+* Embedded Azure Local SBE/LCM: `10.2608.1003.2003`.
+* Dell SBE staged before deployment: AX-15G `5.0.2606.1510`, with XML manifests and ZIP payload under `C:\SBE`.
+* Arc installer on both nodes: `AzSHCI.ARCInstaller 1.2408.0.3053`. This version supports `ArcGatewayID` but not `TargetSolutionVersion`; partner metadata is diagnostic only in this lab.
+* Arc Gateway: `zcoffee-arcgw` in `azljkt01rg`, reused across rebuilds.
+* Pre-deployment status: Stage 5 ARM Validate passed; deployment has not yet been submitted.
 
-The Arc readiness contract is composite rather than status-only: each node must report Arc `Connected`, `connection.type=gateway` when the gateway is enabled, and an Azure Local partner `SolutionVersion` matching the configured `TargetSolutionVersion`. The current lab target is `12.2604.1003`, which must be treated as a matched OS/solution/SBE experiment on this unsupported PowerEdge R650 lab platform.
+This is an experimental lab deployment on PowerEdge R650 hardware using the AX-650-equivalent SBE path. It should not be represented as a Dell-supported R650 production configuration.

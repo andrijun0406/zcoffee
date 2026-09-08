@@ -200,8 +200,36 @@ run against the jump host:
   SP cert -> managed identity -> existing login -> device-code) for unattended runs.
 
 
-## Arc Gateway and partner-metadata recovery
+## 2026-09-07 — 2608 clean rebuild checkpoint
 
-Stage 4 created `zcoffee-arcgw`, associated both existing Arc machines through the Hybrid Compute settings endpoint, and verified `connection.type=gateway` with Arc status `Connected`. The node credential store was corrected to trim the DPAPI blob newline, making Stage 4 zero-touch under the same jump-host identity.
+After the first deployment attempt exposed an unsupported OS/build and inconsistent node-2 registration state, the lab was cleaned selectively while preserving the resource group and Arc Gateway. Both nodes were reimaged in parallel from the Microsoft Azure Portal 2608 ISO.
 
-A later eligibility check showed node 2 was Arc `Connected` but returned `Unknown partner: azurelocal`, while node 1 reported `12.2604.1003`. The cause was the previous Stage 4 optimization that skipped initialization for any already-connected node. The permanent fix passes `TargetSolutionVersion` during fresh initialization, performs a post-initialization probe, and makes Stage 5 verify the composite readiness state before deployment.
+### Stage 1
+
+* The ISO’s embedded WIM reported `10.0.26100.33296`.
+* The ISO contained Azure Local SBE/LCM payload `10.2608.1003.2003`, but it did not populate Dell `C:\SBE`.
+* The unattended disk path succeeded on both nodes: `DELLBOSS VD` disk 8 was selected, DiskPart completed, and the WIM was applied.
+* Node `.84` displayed a Setup choice during one run, but its forensic logs proved `Autounattend.xml` and `bootselect.cmd` were processed and the clean-install path completed.
+* `netbootstrap.ps1` correctly mapped service tags to names, VLAN 230, static IPs, DNS, WinRM, and RDP on both nodes.
+
+### Stage 2, Stage 3, and SBE
+
+* The combined wrapper passed network and node-readiness validation on both nodes.
+* SBE was downloaded from Dell, SHA-256 verified, and staged to both nodes as two manifests plus one ZIP payload.
+* The remote nodes use Windows PowerShell 5.1; remote filesystem operations in ZCOFFEE must use `-Path`, not `-LiteralPath`.
+
+### Stage 4
+
+* Stage 4 installed `AzSHCI.ARCInstaller 1.2408.0.3053` on both nodes.
+* The initializer emitted `Trace-Execution` errors after Azure resources were created. The corrected implementation waits for the actual node postcondition and verifies Azure-side state.
+* Both nodes now report Arc `Connected`, `connection.type=gateway`, and Azure-side `Connected`; repeated Stage 4 runs are idempotent.
+
+### Stage 5 Validate
+
+* The first validation attempts exposed Windows PowerShell 5.1 array flattening (`dnsServers`) and fragile ARM cmdlet backtick continuation.
+* The corrected implementation uses `TemplateParameterObject`, preserves single-item arrays, injects the local admin password at runtime, and uses splatted ARM calls.
+* Stage 5 Validate now passes without creating an Azure Local instance.
+
+### Current checkpoint
+
+The lab is ready for the first real Stage 5 deployment submission. The next run is intentionally irreversible and must be monitored as a separate milestone. Stage 6 remains pending.

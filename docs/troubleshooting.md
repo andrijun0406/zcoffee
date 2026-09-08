@@ -19,7 +19,7 @@ Symptom -> cause -> fix, drawn from real Jakarta 01 deployment. For the full nar
 | RACADM MSI: error 2711 -> 1603 | `ADDLOCAL=RACADM` feature name invalid | Install with full path + `/qn`, drop `ADDLOCAL` |
 | `Invoke-WebRequest`: "IE engine not available" (Server Core, PS 5.1) | No IE DOM engine | Add `-UseBasicParsing` |
 | `Failed to load XML document ... 'doctype'` during Env Checker | Cosmetic warning from the checker's own child runspace; not on the caller pipeline | Cosmetic only — results unaffected; suppress with `3>$null` on Invoke-Command, else ignore |
-| Stage 4 Validate: `Module missing: Az.Resources / AzsHci.ARCInstaller` | Normal in **Validate** mode; modules install in Register mode | Expected; run `-ArcMode Register -Apply` to install + onboard |
+| Stage 4 Validate: `Module missing: Az.Resources / AzsHci.ARCInstaller` | Normal in **Validate** mode; modules install in Register mode | Expected; run `-Mode Register -Apply` to install + onboard |
 | Stage 4 Register uses interactive login unexpectedly | `-UseExistingAzLogin` passed, no SP | Pass `-ServicePrincipalId` + `-ServicePrincipalSecret` for unattended (SP takes precedence) |
 | IMAPI2 `REGDB_E_CLASSNOTREG` on Server Core | IMAPI COM not registered | Build ISOs with **oscdimg** (Windows ADK) |
 | `robocopy` exit 16 mirroring a mounted ISO | `/MIR` on read-only root | Use `/E`; call robocopy directly (avoid arg-quoting mangling) |
@@ -27,7 +27,6 @@ Symptom -> cause -> fix, drawn from real Jakarta 01 deployment. For the full nar
 | WinRM `Access denied` as `LabAdmin` | Wrong account — answer file sets **Administrator** only | Use `.\Administrator`; ensure client `TrustedHosts` covers the nodes |
 | Stage 5 ARM can't find adapters | Adapter names in ARM don't match Windows | Use exact names incl. spaces: `Integrated NIC 1 Port 1-1`, `SLOT 2 Port 1/2` |
 | Az stage: `Az.Accounts not found` | Az PowerShell modules missing on the runner | `Install-Module Az.Accounts, Az.Resources -Scope CurrentUser` |
-| Stage 4/portal: node is Arc `Connected` but Not eligible; `Unknown partner: azurelocal` | Stage 4 skipped initialization because the node was already Connected; Azure Local partner metadata is absent | Preserve the gateway, run `repair-arc-node.ps1` for that node, then verify partner version + gateway mode + Connected status before Stage 5 |
 
 ## Recovering a wedged Remote File Share (RAC0718)
 ```powershell
@@ -68,21 +67,48 @@ Restart-Computer -Force
   and copy->commit->pull drift. Pick one canonical clone; verify with `Select-String` before running.
 
 
-## Connected but Azure Local partner metadata is missing
+## Stage 5 ARM validation issues
 
-Check the node locally:
+### `dnsServers` expected Array but received String
 
-```powershell
-$e = "$env:ProgramFiles\AzureConnectedMachineAgent\azcmagent.exe"
-& $e partnerconfig get SolutionVersion --partner AzureLocal
-& $e config get connection.type
-((& $e show -j 2>$null | Out-String) | ConvertFrom-Json).status
-```
+**Cause:** Windows PowerShell 5.1 unwraps a one-element array returned from a helper.
 
-`Unknown partner: azurelocal` means Arc onboarding completed without Azure Local partner registration. Do not fix this by changing the ARM template or deleting the resource group. Preserve the shared Arc Gateway, remove only the affected Arc machine and its extensions, disconnect the local agent with `azcmagent disconnect --force-local-only`, and run the targeted `repair-arc-node.ps1` helper.
+**Fix:** Preserve arrays with unary-comma return semantics and normalize values from the template’s declared parameter type. Use `TemplateParameterObject`; do not combine `TemplateParameterFile` and `TemplateParameterObject`.
 
-The permanent Stage 4 gate now passes `TargetSolutionVersion` to `Invoke-AzStackHciArcInitialization`, rechecks metadata after initialization, and refuses to report Register success unless the composite readiness contract is satisfied. Stage 5 repeats the composite check over WinRM.
+### Dynamic parameter error: template argument missing
 
-## Arc Gateway reuse
+**Cause:** Backtick continuation was broken by blank lines, so `-TemplateFile` was not passed to the Az cmdlet.
 
-`config/arc-gateway.local.json` is local state and must not be committed. If the gateway resource already exists, Stage 4 reuses it by exact resource ID/name and does not call `New-AzArcGateway` again.
+**Fix:** Use splatted hashtables for `Test-AzResourceGroupDeployment`, What-If, and deployment calls.
+
+## SBE staging
+
+### Stage 3 warns `C:\SBE` is missing after a Microsoft image
+
+**Cause:** The Microsoft Portal 2608 ISO contains Azure Local SBE/LCM content but does not populate the Dell SBE staging directory.
+
+**Fix:** Download/verify the Dell AX-15G bundle and run `stage-sbe.ps1` before Stage 4. Expected contents are two XML manifests and one ZIP payload. Azure Local/LCM applies the SBE during Stage 5 deployment; Azure Update Manager is not the initial staging mechanism.
+
+### `-LiteralPath` unsupported during remote SBE staging
+
+**Cause:** The nodes run Windows PowerShell 5.1 where the relevant provider command does not expose `-LiteralPath`.
+
+**Fix:** Use `-Path` for remote `New-Item`, `Test-Path`, `Get-ChildItem`, `Remove-Item`, and `Copy-Item`; reserve `-LiteralPath` for local jump-host operations where supported.
+
+## Stage 4 Arc registration
+
+### Initializer reports `Trace-Execution` but Azure machine is Connected
+
+**Cause:** `AzSHCI.ARCInstaller 1.2408.0.3053` can throw after Azure resource creation.
+
+**Fix:** Treat the initializer exception as provisional, poll `azcmagent show -j`, verify `connection.type`, and confirm `Get-AzConnectedMachine` reports `Connected`. Fail only when the postconditions fail.
+
+### Partner metadata is missing
+
+**Cause:** The installed initializer does not support `TargetSolutionVersion`.
+
+**Fix:** Log a warning and skip partner-version enforcement when the parameter is unsupported. Do not invent a `partnerconfig set` command.
+
+## Reimage forensics
+
+The Stage 1 collector should remain independent of Arc. Collect raw and cleaned `bootdisk-select.log`, Setup/Panther and UnattendGC logs, `netbootstrap.log`, `bootstrap-success.txt`, Setup event logs, and `$WINDOWS.~BT` presence before proceeding to Stage 2.
