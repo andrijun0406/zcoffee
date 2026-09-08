@@ -123,6 +123,12 @@ param(
 
     [switch]$SkipArcCheck,
 
+    # Detect managed RBAC automatically; cleanup is never implicit.
+    [switch]$CleanupExistingRoleAssignments,
+
+    # Explicitly continue despite potential stale managed assignments.
+    [switch]$IgnoreExistingRoleAssignments,
+
     [switch]$UseGui
 
 )
@@ -169,6 +175,8 @@ if (-not $LocalAdminUser) { $LocalAdminUser = 'Administrator' }
 # Normalize the local account once so WinRM and DPAPI credential lookup use
 # the same explicit workgroup identity (for example, .\Administrator).
 $script:authUser = $LocalAdminUser
+$script:CleanupExistingRoleAssignments = [bool]$CleanupExistingRoleAssignments
+$script:IgnoreExistingRoleAssignments = [bool]$IgnoreExistingRoleAssignments
 if ($script:authUser -notmatch '[\\@]') { $script:authUser = ".\\$script:authUser" }
 
 $UseArcGateway     = [bool](Resolve-Setting -Name 'UseArcGateway' -Bound $b -Current ([bool]$UseArcGateway) -ConfigKey 'UseArcGateway' -Config $cfg)
@@ -197,6 +205,18 @@ if ($DeploymentMode -eq 'Deploy' -and -not $EnableDeployment) {
 
 }
 
+if ($CleanupExistingRoleAssignments -and $IgnoreExistingRoleAssignments) {
+    throw 'Use only one of -CleanupExistingRoleAssignments or -IgnoreExistingRoleAssignments.'
+}
+
+if ($CleanupExistingRoleAssignments -and $DeploymentMode -ne 'Deploy') {
+    throw '-CleanupExistingRoleAssignments is allowed only with -DeploymentMode Deploy.'
+}
+
+if ($CleanupExistingRoleAssignments -and -not $EnableDeployment) {
+    throw '-CleanupExistingRoleAssignments requires -EnableDeployment.'
+}
+
 
 
 $totalSteps = 5
@@ -206,6 +226,91 @@ if ($DeploymentMode -eq 'Deploy') { $totalSteps = 6 }
 Initialize-Ui -StageName '05-deploy-azure-local' -TotalSteps $totalSteps -UseGui:$UseGui
 
 
+
+# Azure Local managed role assignment helpers.
+# Detection is automatic; deletion requires explicit cleanup switch + confirmation.
+$script:azureLocalManagedRoleNames = @(
+    'Azure Connected Machine Resource Manager',
+    'Azure Stack HCI Device Management Role',
+    'Azure Stack HCI Connected InfraVMs',
+    'Key Vault Secrets Officer',
+    'Key Vault Certificates Officer'
+)
+
+function Get-CurrentArcPrincipalIds {
+    param([Parameter(Mandatory)][string[]]$ArcResourceIds)
+
+    $result = @()
+    foreach ($arcId in $ArcResourceIds) {
+        $path = '{0}?api-version=2023-10-03-preview' -f $arcId
+        try {
+            $response = Invoke-AzRestMethod -Method GET -Path $path -ErrorAction Stop
+            $doc = $response.Content | ConvertFrom-Json
+            $principal = [string]$doc.identity.principalId
+            if (-not [string]::IsNullOrWhiteSpace($principal)) {
+                $result += $principal
+            }
+        }
+        catch {
+            Write-Warn "Could not resolve current Arc principal for $arcId: $($_.Exception.Message)"
+        }
+    }
+    return @($result)
+}
+
+function Get-AzureLocalManagedRoleAssignments {
+    param([Parameter(Mandatory)][string]$ResourceGroupScope)
+
+    $all = @(Get-AzRoleAssignment -Scope $ResourceGroupScope -ErrorAction Stop)
+    return @($all | Where-Object {
+        $_.Scope -ieq $ResourceGroupScope -and
+        $_.RoleDefinitionName -in $script:azureLocalManagedRoleNames
+    })
+}
+
+function Remove-AzureLocalManagedRoleAssignments {
+    param([Parameter(Mandatory)][object[]]$Assignments)
+
+    foreach ($assignment in $Assignments) {
+        $path = '{0}?api-version=2022-04-01' -f $assignment.RoleAssignmentId
+        try {
+            $result = Invoke-AzRestMethod -Method DELETE -Path $path -ErrorAction Stop
+            Write-Info "Submitted stale role-assignment delete: $($assignment.RoleDefinitionName) / $($assignment.ObjectId) (HTTP $($result.StatusCode))"
+        }
+        catch {
+            if ($_.Exception.Message -notmatch '404|NotFound') {
+                throw "Failed deleting role assignment $($assignment.RoleAssignmentId): $($_.Exception.Message)"
+            }
+        }
+    }
+
+    $deadline = (Get-Date).AddMinutes(5)
+    $pending = @($Assignments)
+    while ($pending.Count -gt 0 -and (Get-Date) -lt $deadline) {
+        $next = @()
+        foreach ($assignment in $pending) {
+            $path = '{0}?api-version=2022-04-01' -f $assignment.RoleAssignmentId
+            try {
+                Invoke-AzRestMethod -Method GET -Path $path -ErrorAction Stop | Out-Null
+                $next += $assignment
+            }
+            catch {
+                if ($_.Exception.Message -match '404|NotFound') {
+                    Write-Info "Deleted stale role assignment: $($assignment.RoleAssignmentId)"
+                }
+                else {
+                    $next += $assignment
+                }
+            }
+        }
+        $pending = @($next)
+        if ($pending.Count -gt 0) { Start-Sleep -Seconds 5 }
+    }
+
+    if ($pending.Count -gt 0) {
+        throw "Timed out waiting for stale role-assignment deletion: $(($pending | ForEach-Object { $_.RoleAssignmentId }) -join '; ')"
+    }
+}
 
 try {
 
@@ -396,6 +501,64 @@ try {
         if (-not $arcIds -or $arcIds.Count -lt 2) { throw 'arcNodeResourceIds must list both node resource IDs.' }
 
         $script:arcIds = $arcIds
+
+
+        # Detect residue from prior failed deployments without deleting it automatically.
+        $clusterResidue = @(Get-AzResource -ResourceGroupName $script:ResourceGroupName -ResourceType 'Microsoft.AzureStackHCI/clusters' -ErrorAction SilentlyContinue)
+        if ($clusterResidue.Count -gt 0) {
+            throw "Existing Azure Local cluster residue detected: $($clusterResidue.Name -join ', '). Use the supported decommission/cleanup path before a new deployment."
+        }
+
+        $residue = @(Get-AzResource -ResourceGroupName $script:ResourceGroupName -ErrorAction SilentlyContinue | Where-Object {
+            $_.ResourceType -in @('Microsoft.KeyVault/vaults','Microsoft.Storage/storageAccounts')
+        })
+        if ($residue.Count -gt 0) {
+            Write-Warn "Existing deployment artifacts detected and may be reused: $($residue.Name -join ', ')."
+        }
+
+        # A reimage changes system-assigned principal IDs while Arc resource IDs stay
+        # stable. Azure forbids updating immutable role-assignment principal/scope fields.
+        $roleScope = "/subscriptions/$($script:SubscriptionId)/resourceGroups/$($script:ResourceGroupName)"
+        $existingManagedAssignments = @(Get-AzureLocalManagedRoleAssignments -ResourceGroupScope $roleScope)
+        $currentPrincipalIds = @(Get-CurrentArcPrincipalIds -ArcResourceIds $arcIds)
+        $potentialConflicts = @($existingManagedAssignments)
+        if ($currentPrincipalIds.Count -gt 0) {
+            $potentialConflicts = @($existingManagedAssignments | Where-Object {
+                $currentPrincipalIds -notcontains ([string]$_.ObjectId)
+            })
+        }
+
+        if ($existingManagedAssignments.Count -gt 0) {
+            Write-Warn "Existing Azure Local managed role assignments detected: $($existingManagedAssignments.Count)."
+            foreach ($assignment in $existingManagedAssignments) {
+                $classification = if ($potentialConflicts -contains $assignment) { 'potential-stale-conflict' } else { 'current-principal' }
+                Write-Warn "  ${classification}: $($assignment.RoleDefinitionName) / $($assignment.ObjectId) / $($assignment.RoleAssignmentId)"
+            }
+        }
+
+        if ($potentialConflicts.Count -gt 0) {
+            if ($script:CleanupExistingRoleAssignments) {
+                $confirmation = Read-Host 'Type REPAIR-STALE-ROLE-ASSIGNMENTS to delete only these RG-scoped managed assignments'
+                if ($confirmation -cne 'REPAIR-STALE-ROLE-ASSIGNMENTS') {
+                    throw 'Stale role-assignment cleanup cancelled.'
+                }
+                Remove-AzureLocalManagedRoleAssignments -Assignments $potentialConflicts
+                Write-Ok "Removed $($potentialConflicts.Count) stale Azure Local managed role assignments."
+            }
+            elseif ($script:IgnoreExistingRoleAssignments) {
+                Write-Warn 'Continuing despite potential stale role assignments because -IgnoreExistingRoleAssignments was supplied.'
+            }
+            else {
+                $summary = ($potentialConflicts | ForEach-Object { "$($_.RoleDefinitionName) [$($_.ObjectId)]" }) -join '; '
+                throw "Potential stale Azure Local role assignments may cause RoleAssignmentUpdateNotPermitted: $summary. Use -CleanupExistingRoleAssignments for explicit lab cleanup or -IgnoreExistingRoleAssignments to proceed without deletion."
+            }
+        }
+        elseif ($existingManagedAssignments.Count -gt 0) {
+            Write-Info 'Existing managed assignments target current Arc principals; no stale conflict detected.'
+        }
+        else {
+            Write-Ok 'No existing RG-scoped Azure Local managed role assignments detected.'
+        }
 
 
 
@@ -761,14 +924,11 @@ try {
             }
 
             if ($Value -is [System.Collections.IDictionary]) {
-                if (($Value.Keys -contains 'value') -and $Value.Keys.Count -eq 1) {
-                    return ConvertTo-ArmRuntimeValue $Value['value']
-                }
                 $h = [ordered]@{}
                 foreach ($key in $Value.Keys) {
                     $h[$key] = ConvertTo-ArmRuntimeValue $Value[$key]
                 }
-                return $h
+                return ,$h
             }
 
             if ($Value -is [pscustomobject]) {
@@ -776,19 +936,41 @@ try {
                 foreach ($prop in $Value.PSObject.Properties) {
                     $h[$prop.Name] = ConvertTo-ArmRuntimeValue $prop.Value
                 }
-                return $h
+                return ,$h
             }
 
             if (($Value -is [System.Collections.IEnumerable]) -and
                 -not ($Value -is [string])) {
-                $items = @()
+                # Return a real object[] atomically. This prevents Windows
+                # PowerShell 5.1 from unrolling one-item arrays.
+                $items = New-Object System.Collections.ArrayList
                 foreach ($item in $Value) {
-                    $items += ,(ConvertTo-ArmRuntimeValue $item)
+                    [void]$items.Add((ConvertTo-ArmRuntimeValue $item))
                 }
-                return ,$items
+                return ,([object[]]$items.ToArray())
             }
 
             return $Value
+        }
+
+
+        # Normalize values according to the ARM template schema before writing JSON.
+        # This protects one-element arrays such as dnsServers from PowerShell 5.1
+        # scalar unrolling.
+        foreach ($meta in $script:templateJson.parameters.PSObject.Properties) {
+            if ([string]$meta.Value.type -ne 'array') { continue }
+            if (-not ($script:templateParameterObject.Keys -contains $meta.Name)) { continue }
+
+            $v = $script:templateParameterObject[$meta.Name]
+            if ($null -eq $v) {
+                $script:templateParameterObject[$meta.Name] = (New-Object System.Collections.ArrayList)
+            }
+            elseif ($v -is [string] -or
+                    -not ($v -is [System.Collections.IEnumerable])) {
+                $list = New-Object System.Collections.ArrayList
+                [void]$list.Add($v)
+                $script:templateParameterObject[$meta.Name] = $list
+            }
         }
 
         $runtimeDoc = [ordered]@{
@@ -805,69 +987,44 @@ try {
             parameters = [ordered]@{}
         }
 
-        # Normalize each ARM value before serialization. Some Windows PowerShell/Az
-        # conversion paths can leave an ARM entry wrapper ({ value = ... }) in the
-        # value bag. ARM needs the raw value, especially for one-item arrays such as
-        # dnsServers. Unwrap that container before writing the runtime parameter file.
-        $armArrayParameterNames = @()
-        foreach ($templateParameter in $script:templateJson.parameters.PSObject.Properties) {
-            if ($templateParameter.Value.type -eq 'array') {
-                $armArrayParameterNames += $templateParameter.Name
-            }
-        }
-
         foreach ($key in $script:templateParameterObject.Keys) {
-            $rawValue = $script:templateParameterObject[$key]
-
-            if ($rawValue -is [System.Collections.IDictionary] -and
-                ($rawValue.Keys -contains 'value') -and
-                $rawValue.Keys.Count -eq 1) {
-                $rawValue = $rawValue['value']
-            }
-
-            # Force ARM array parameters to remain arrays even when they have one item.
-            if ($armArrayParameterNames -contains $key) {
-                if ($rawValue -is [System.Collections.IDictionary] -and
-                    ($rawValue.Keys -contains 'value') -and
-                    $rawValue.Keys.Count -eq 1) {
-                    $rawValue = $rawValue['value']
-                }
-                if ($rawValue -is [string] -or $null -eq $rawValue) {
-                    $rawValue = @($rawValue)
-                }
-                else {
-                    $rawValue = @($rawValue)
-                }
-            }
-
-            $runtimeDoc.parameters[$key] = [ordered]@{
-                value = ConvertTo-ArmRuntimeValue $rawValue
-            }
+            $safeValue = ConvertTo-ArmRuntimeValue $script:templateParameterObject[$key]
+            $runtimeDoc.parameters[$key] = [ordered]@{ value = $safeValue }
         }
 
         $runtimeParameterFileName = 'zcoffee-arm-parameters-{0}-{1}.json' -f `
             $script:DeploymentName, ([Guid]::NewGuid().ToString('N'))
         $script:runtimeParameterFile = Join-Path ([IO.Path]::GetTempPath()) $runtimeParameterFileName
-        $runtimeJson = $runtimeDoc | ConvertTo-Json -Depth 100
+        Add-Type -AssemblyName System.Web.Extensions -ErrorAction Stop
+        $serializer = New-Object System.Web.Script.Serialization.JavaScriptSerializer
+        $runtimeJson = $serializer.Serialize($runtimeDoc)
         $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
         [IO.File]::WriteAllText($script:runtimeParameterFile, $runtimeJson, $utf8NoBom)
 
         Write-Info "Runtime ARM parameter file: $script:runtimeParameterFile"
         Write-Info "Runtime ARM parameter count: $($runtimeDoc.parameters.Count)"
         if ($runtimeDoc.parameters.Keys -contains 'dnsServers') {
-            $dnsRuntime = $runtimeDoc.parameters['dnsServers']['value']
+            $dnsEntry = $runtimeDoc.parameters['dnsServers']
+            $dnsRuntime = $dnsEntry['value']
             if ($null -ne $dnsRuntime) {
                 $dnsType = $dnsRuntime.GetType().FullName
-                $dnsCount = if ($dnsRuntime -is [Array]) { $dnsRuntime.Count } else { '-' }
+                $dnsCount = if ($dnsRuntime -is [System.Collections.ICollection]) { $dnsRuntime.Count } else { '-' }
                 Write-Info "Runtime dnsServers shape: $dnsType; Count=$dnsCount"
-                if (-not ($dnsRuntime -is [Array])) {
-                    throw 'Runtime dnsServers.value is not an array; refusing to continue.'
-                }
             }
             else {
                 Write-Warn 'Runtime dnsServers is NULL.'
             }
         }
+
+        # Read the exact serialized representation with JavaScriptSerializer so
+        # validation does not rely on ConvertFrom-Json's one-item unrolling.
+        $serializedDoc = $serializer.DeserializeObject($runtimeJson)
+        $serializedDns = $serializedDoc['parameters']['dnsServers']['value']
+        if ($serializedDns -is [string] -or
+            -not ($serializedDns -is [System.Array])) {
+            throw 'Runtime ARM parameter file serialized dnsServers.value as a scalar; refusing to continue.'
+        }
+        Write-Info "Serialized dnsServers.value is an array; Count=$($serializedDns.Count)"
 
         Write-Ok "Local admin '$script:LocalAdminUser' credential prepared for injection (never logged)."
 
