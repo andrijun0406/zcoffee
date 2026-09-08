@@ -248,13 +248,29 @@ try {
 
         if (-not $script:TenantId) { throw 'TenantId is required (pass -TenantId).' }
 
-        $ctx = Connect-AzForStage -TenantId $script:TenantId -SubscriptionId $script:SubscriptionId `
-
-            -ServicePrincipalId $script:ServicePrincipalId -ServicePrincipalSecret $script:ServicePrincipalSecret `
-
-            -CertificateThumbprint $script:CertificateThumbprint -UseManagedIdentity:$script:UseManagedIdentity `
-
-            -UseExistingAzLogin:$script:UseExistingAzLogin
+        # Use splatting instead of backtick continuation. Windows PowerShell 5.1
+        # treats a blank line after a backtick as the end of the command, which
+        # can make -ServicePrincipalId appear to be a standalone command.
+        $authArgs = @{
+            TenantId       = $script:TenantId
+            SubscriptionId = $script:SubscriptionId
+        }
+        if ($script:ServicePrincipalId) {
+            $authArgs['ServicePrincipalId'] = $script:ServicePrincipalId
+        }
+        if ($null -ne $script:ServicePrincipalSecret) {
+            $authArgs['ServicePrincipalSecret'] = $script:ServicePrincipalSecret
+        }
+        if ($script:CertificateThumbprint) {
+            $authArgs['CertificateThumbprint'] = $script:CertificateThumbprint
+        }
+        if ($script:UseManagedIdentity) {
+            $authArgs['UseManagedIdentity'] = $true
+        }
+        if ($script:UseExistingAzLogin) {
+            $authArgs['UseExistingAzLogin'] = $true
+        }
+        $ctx = Connect-AzForStage @authArgs
 
         if ($script:TenantId -and $ctx.Tenant.Id -ne $script:TenantId) {
 
