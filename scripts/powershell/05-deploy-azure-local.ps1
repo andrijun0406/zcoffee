@@ -747,15 +747,16 @@ try {
 
         Invoke-Step 'Run non-mutating ARM validation (Test-AzResourceGroupDeployment)' {
 
-            $r = Test-AzResourceGroupDeployment `
-
-                    -ResourceGroupName $script:ResourceGroupName `
-
-                    -TemplateFile $script:TemplateFile `
-
-                    -TemplateParameterObject $script:templateParameterObject `
-
-                    -ErrorAction Stop 4>$null
+            # Use splatting rather than backtick continuations. Windows PowerShell 5.1
+            # can terminate a continued command when blank lines occur after a backtick,
+            # causing ARM dynamic-parameter errors such as "TemplateFile not supplied".
+            $validationArgs = @{
+                ResourceGroupName       = $script:ResourceGroupName
+                TemplateFile            = $script:TemplateFile
+                TemplateParameterObject = $script:templateParameterObject
+                ErrorAction             = 'Stop'
+            }
+            $r = Test-AzResourceGroupDeployment @validationArgs 4>$null
 
             if ($r) {
 
@@ -787,15 +788,13 @@ try {
 
         Write-Info 'Running What-If (this can take a few minutes)...'
 
-        $wi = Get-AzResourceGroupDeploymentWhatIfResult `
-
-                -ResourceGroupName $script:ResourceGroupName `
-
-                -TemplateFile $script:TemplateFile `
-
-                -TemplateParameterObject $script:templateParameterObject `
-
-                -ErrorAction Stop
+        $whatIfArgs = @{
+            ResourceGroupName       = $script:ResourceGroupName
+            TemplateFile            = $script:TemplateFile
+            TemplateParameterObject = $script:templateParameterObject
+            ErrorAction             = 'Stop'
+        }
+        $wi = Get-AzResourceGroupDeploymentWhatIfResult @whatIfArgs
 
         $wi | Out-Host
 
@@ -813,17 +812,14 @@ try {
 
 
 
-        $dep = New-AzResourceGroupDeployment `
-
-                -ResourceGroupName $script:ResourceGroupName `
-
-                -Name $script:DeploymentName `
-
-                -TemplateFile $script:TemplateFile `
-
-                -TemplateParameterObject $script:templateParameterObject `
-
-                -ErrorAction Stop
+        $deploymentArgs = @{
+            ResourceGroupName       = $script:ResourceGroupName
+            Name                    = $script:DeploymentName
+            TemplateFile            = $script:TemplateFile
+            TemplateParameterObject = $script:templateParameterObject
+            ErrorAction             = 'Stop'
+        }
+        $dep = New-AzResourceGroupDeployment @deploymentArgs
 
         Write-Ok "Deployment submitted: $($dep.DeploymentName) - provisioning state: $($dep.ProvisioningState)"
 
