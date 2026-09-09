@@ -1379,7 +1379,33 @@ try {
         }
         $dep = New-AzResourceGroupDeployment @deploymentArgs
 
-        Write-Ok "Deployment submitted: $($dep.DeploymentName) - provisioning state: $($dep.ProvisioningState)"
+        if ($null -eq $dep) {
+            throw 'ARM deployment returned no deployment object.'
+        }
+
+        $depState = ([string]$dep.ProvisioningState).Trim()
+        if ($depState -in @('Failed', 'Canceled', 'CanceledByUser')) {
+            throw (
+                'ARM deployment {0} returned terminal state {1}.' -f
+                $dep.DeploymentName,
+                $depState
+            )
+        }
+
+        if ($depState -eq 'Succeeded') {
+            Write-Ok (
+                'Deployment submitted: {0} - provisioning state: {1}' -f
+                $dep.DeploymentName,
+                $depState
+            )
+        }
+        else {
+            Write-Warn (
+                'Deployment submitted: {0} - nonterminal provisioning state: {1}' -f
+                $dep.DeploymentName,
+                $depState
+            )
+        }
 
         Write-Info 'Azure Local cloud deployment runs for 1-3 hours. Track it in the portal (Azure Local instance) or with Get-AzResourceGroupDeployment.'
 
@@ -1387,7 +1413,7 @@ try {
 
 
 
-    Complete-Ui -FinalMessage 'ARM deployment submitted.'
+    Complete-Ui -FinalMessage ('ARM deployment submitted (state: {0}).' -f $depState)
 
 }
 
