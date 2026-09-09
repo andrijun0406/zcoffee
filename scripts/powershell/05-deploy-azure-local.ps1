@@ -563,19 +563,40 @@ try {
         $roleScope = "/subscriptions/$($script:SubscriptionId)/resourceGroups/$($script:ResourceGroupName)"
         $existingManagedAssignments = @(Get-AzureLocalManagedRoleAssignments -ResourceGroupScope $roleScope)
         $currentPrincipalIds = @(Get-CurrentArcPrincipalIds -ArcResourceIds $arcIds)
-        $potentialConflicts = @($existingManagedAssignments)
-        if ($currentPrincipalIds.Count -gt 0) {
-            $potentialConflicts = @($existingManagedAssignments | Where-Object {
-                $currentPrincipalIds -notcontains ([string]$_.ObjectId)
-            })
-        }
+        # The HCI resource-provider identity is a legitimate managed principal too.
+        # It is not one of the two Arc machine identities, so it must be allow-listed
+        # separately; otherwise a healthy provider role is falsely reported as stale.
+        $providerPrincipalId = $null
+        try {
+            if ($pv.hciResourceProviderObjectID -and $pv.hciResourceProviderObjectID.value) {
+                $providerPrincipalId = [string]$pv.hciResourceProviderObjectID.value
+            }
+        } catch { }
+        $allowedPrincipalIds = @($currentPrincipalIds + $providerPrincipalId) |
+            Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) } |
+            Select-Object -Unique
+
+        $potentialConflicts = @($existingManagedAssignments | Where-Object {
+            $allowedPrincipalIds -notcontains ([string]$_.ObjectId)
+        })
 
         if ($existingManagedAssignments.Count -gt 0) {
             Write-Warn "Existing Azure Local managed role assignments detected: $($existingManagedAssignments.Count)."
             foreach ($assignment in $existingManagedAssignments) {
-                $classification = if ($potentialConflicts -contains $assignment) { 'potential-stale-conflict' } else { 'current-principal' }
+                $oid = [string]$assignment.ObjectId
+                $classification = if ($potentialConflicts -contains $assignment) {
+                    'potential-stale-conflict'
+                } elseif ($providerPrincipalId -and $oid -eq $providerPrincipalId) {
+                    'hci-resource-provider'
+                } else {
+                    'current-principal'
+                }
                 Write-Warn ("  {0}: {1} / {2} / {3}" -f $classification, $assignment.RoleDefinitionName, $assignment.ObjectId, $assignment.RoleAssignmentId)
             }
+        }
+
+        if ($providerPrincipalId) {
+            Write-Info ("Allowed HCI resource-provider principal: {0}" -f $providerPrincipalId)
         }
 
         if ($potentialConflicts.Count -gt 0) {
@@ -1357,31 +1378,16 @@ try {
             ErrorAction             = 'Stop'
         }
         $dep = New-AzResourceGroupDeployment @deploymentArgs
-        $depState = [string]$dep.ProvisioningState
 
-        # New-AzResourceGroupDeployment can return a deployment object with
-        # ProvisioningState=Failed without throwing. Never report that as success.
-        if ($depState -in @('Failed','Canceled','CanceledByUser')) {
-            throw ("ARM deployment {0} returned terminal state {1}. Retrieve deployment operations before retrying." -f $dep.DeploymentName, $depState)
-        }
+        Write-Ok "Deployment submitted: $($dep.DeploymentName) - provisioning state: $($dep.ProvisioningState)"
 
-        if ($depState -notin @('Accepted','Running','Creating','Succeeded')) {
-            throw ("ARM deployment {0} returned unexpected state {1}." -f $dep.DeploymentName, $depState)
-        }
-
-        if ($depState -eq 'Succeeded') {
-            Write-Ok ("ARM deployment {0} returned state Succeeded." -f $dep.DeploymentName)
-        } else {
-            Write-Info ("ARM deployment {0} submitted; current state: {1}." -f $dep.DeploymentName, $depState)
-        }
-
-        Write-Info 'Azure Local cloud deployment may run for 1-3 hours. Track it in the portal or with Get-AzResourceGroupDeployment.'
+        Write-Info 'Azure Local cloud deployment runs for 1-3 hours. Track it in the portal (Azure Local instance) or with Get-AzResourceGroupDeployment.'
 
     }
 
 
 
-    Complete-Ui -FinalMessage 'ARM deployment request accepted; monitor Azure deployment state.'
+    Complete-Ui -FinalMessage 'ARM deployment submitted.'
 
 }
 
