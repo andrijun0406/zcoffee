@@ -730,7 +730,7 @@
               "name": "[guid(concat('INFRAVM-RoleAssign', parameters('arcNodeResourceIds1')[copyIndex()]))]",
               "properties": {
                 "mode": "Incremental",
-                "roleDefinitionId": "[concat(subscription().id, '/providers/Microsoft.Authorization/roleDefinitions/', 'c99c945f-8bd1-4fb1-a903-01460aae6068')]",
+                "roleDefinitionId": "[concat(subscription().id, '/providers/Microsoft.Authorization/roleDefinitions/', 'c99c945f8bd14fb1a90301460aae6068')]",
                 "principalId": "[reference(parameters('arcNodeResourceIds1')[copyIndex()], '2023-10-03-preview', 'full').identity.principalId]",
                 "scope": "[resourceGroup().id]",
                 "description": "[concat(substring(parameters('arcNodeResourceIds1')[copyIndex()],lastIndexOf(parameters('arcNodeResourceIds1')[copyIndex()],'/')),'- Azure Stack HCI Connected InfraVMs')]"
