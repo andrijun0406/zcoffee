@@ -1,0 +1,21 @@
+profileName: dell-ax-15g-switchless
+vendor: Dell
+family: AX-15G
+supportStatus: experimental-on-PowerEdge-R650
+notes: R650 lab hardware is AX-650-like but not catalog-certified.
+expectedAdapters:
+  management:
+    - Integrated NIC 1 Port 1-1
+    - Integrated NIC 1 Port 2-1
+  storage:
+    - SLOT 2 Port 1
+    - SLOT 2 Port 2
+linkRequirements:
+  managementGbps: 10
+  storageGbps: 25
+storage:
+  switchless: true
+  rdmaTechnology: iWARP
+  storageVlans:
+    - 711
+    - 712

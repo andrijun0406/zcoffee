@@ -1,0 +1,84 @@
+schemaVersion: 1
+provider: ODIN
+
+# This spec is the desired state for the ZCOFFEE demo unit.
+# Secrets remain outside this file.
+azure:
+  subscriptionId: ''
+  tenantId: ''
+
+identity:
+  localAdminUser: Administrator
+
+deployment:
+  name: azljkt01
+  region: southeastasia
+  deploymentMode: Deploy
+  resourceGroup: azljkt01rg
+  customLocation: azljkt01loc
+  templateFile: ..\arm-templates\odin-template.deploy-fixed.json
+  parameterFile: ..\arm-templates\odin-parameters.json
+  httpHost: 10.8.230.221
+  isoFile: ''
+
+cluster:
+  name: azljkt01clu
+  networkingType: switchlessMultiServerDeployment
+  configurationMode: Express
+  identityProvider: LocalIdentity
+  witnessType: Cloud
+
+hardwareProfile: profiles/dell-ax-15g-switchless.yaml
+
+nodes:
+  - name: azljkt01n1
+    hostIp: 10.8.230.232
+    idracIp: 10.8.230.84
+    serviceTag: JF7C7J3
+    mgmtMac: 34:80:0D:2E:7B:B0
+  - name: azljkt01n2
+    hostIp: 10.8.230.235
+    idracIp: 10.8.230.86
+    serviceTag: 1G7C7J3
+    mgmtMac: 34:80:0D:2E:8B:88
+
+network:
+  dnsServers:
+    - 10.8.230.51
+  dnsSuffix: zcoffee.com
+  gateway: 10.8.230.1
+  mgmtVlan: 230
+  storageVlans:
+    - 711
+    - 712
+  infraIpPool:
+    start: 10.8.230.132
+    end: 10.8.230.137
+  storageAutoIpSubnet: 10.71.0.0/16
+
+sbe:
+  vendor: Dell
+  family: AX-15G
+  required: true
+  sourcePath: C:\zcoffee\sbe\AX650-2606\contents
+  downloadUrl: https://dl.dell.com/FOLDER14700241M/1/Bundle_SBE_Dell_AX-15G_5.0.2606.1510.zip
+  expectedSha256: 388c377f792121772c09f48ae520e6ccdcf5dc6808570c424d271b7d14dd7bc8
+
+arc:
+  useGateway: true
+  gatewayName: zcoffee-arcgw
+  gatewayIdFile: config/arc-gateway.local.json
+  requireConnected: true
+  requireGatewayMode: true
+
+preflight:
+  expectedOsBuild: 26100.33296
+  requireSbeFiles: true
+  requireHardwareProfile: true
+  blockExistingCluster: false
+  failOnUnsupportedCatalog: false
+  experimentalHardware: true
+
+telemetry:
+  outputDirectory: logs
+  retainRuntimeArmDebug: true
