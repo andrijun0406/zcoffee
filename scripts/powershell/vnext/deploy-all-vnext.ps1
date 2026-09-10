@@ -1,4 +1,4 @@
-﻿<#
+<#
 .SYNOPSIS
     Spec-driven, backward-compatible ZCOFFEE orchestrator.
 .DESCRIPTION
@@ -28,7 +28,7 @@ param(
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
-. (Join-Path $PSScriptRoot 'ui-common.ps1')
+. (Join-Path $PSScriptRoot '..\ui-common.ps1')
 . (Join-Path $PSScriptRoot 'zcoffee-spec.ps1')
 . (Join-Path $PSScriptRoot 'zcoffee-timing.ps1')
 
@@ -141,3 +141,4 @@ finally {
 }
 
 Write-Host "Timing report: $timingFile"
+

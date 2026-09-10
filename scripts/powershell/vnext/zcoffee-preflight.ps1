@@ -1,4 +1,4 @@
-﻿<#
+<#
 .SYNOPSIS
     ZCOFFEE vNext dependency and support preflight.
 .DESCRIPTION
@@ -20,7 +20,7 @@ param(
 )
 Set-StrictMode -Version Latest
 $ErrorActionPreference='Stop'
-. (Join-Path $PSScriptRoot 'ui-common.ps1')
+. (Join-Path $PSScriptRoot '..\ui-common.ps1')
 . (Join-Path $PSScriptRoot 'zcoffee-spec.ps1')
 . (Join-Path $PSScriptRoot 'zcoffee-timing.ps1')
 
@@ -51,3 +51,5 @@ if(-not $SkipAzure -and -not $SkipArc){Import-Module Az.Accounts -ErrorAction St
 $results | Format-Table -AutoSize
 Write-Host ("SUMMARY: {0} failures, {1} warnings" -f $errors.Count,$warnings.Count)
 if($errors.Count){throw ($errors -join ' | ')}
+
+
