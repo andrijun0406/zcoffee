@@ -41,7 +41,7 @@ trap {
     break
 }
 
-$uiPath = Join-Path $PSScriptRoot '..\ui-common.ps1'
+$uiPath = Join-Path $PSScriptRoot 'ui-common.ps1'
 if (Test-Path -Path $uiPath -PathType Leaf) {
     . $uiPath
     Write-Host ("[ZCOFFEE] Loaded shared UI: {0}" -f $uiPath)
@@ -77,13 +77,20 @@ function Get-ArmPath {
 
 function Test-ArmResourceExists {
     param([string]$ResourceId, [string]$ApiVersion)
+    $path = Get-ArmPath $ResourceId $ApiVersion
     try {
-        Invoke-AzRestMethod -Method GET -Path (Get-ArmPath $ResourceId $ApiVersion) -ErrorAction Stop | Out-Null
+        $response = Invoke-AzRestMethod -Method GET -Path $path -ErrorAction Stop
+        $status = $null
+        if ($response -and ($response.PSObject.Properties.Name -contains 'StatusCode')) {
+            $status = [int]$response.StatusCode
+        }
+        if ($null -ne $status -and $status -eq 404) { return $false }
         return $true
     }
     catch {
-        if ($_.Exception.Message -match '404|NotFound') { return $false }
-        throw
+        $message = [string]$_.Exception.Message
+        if ($message -match '404|NotFound') { return $false }
+        throw ("ARM existence probe failed for {0}: {1}" -f $ResourceId, $message)
     }
 }
 
@@ -143,11 +150,20 @@ if ($TenantId -and $ctx.Tenant -and $ctx.Tenant.Id -ne $TenantId) {
 }
 
 $clusterId = "$base/providers/Microsoft.AzureStackHCI/clusters/azljkt01clu"
-if (Test-ArmResourceExists $clusterId '2025-09-15-preview') {
-    throw 'Azure Local cluster exists. Use the supported decommission/unregister workflow; cleanup is blocked.'
+try {
+    $clusterExists = Test-ArmResourceExists $clusterId '2025-09-15-preview'
+    if ($clusterExists) {
+        Write-StageWarn ("Cluster probe: {0} returned 200; cleanup is blocked." -f $clusterId)
+        throw 'Azure Local cluster exists. Use the supported decommission/unregister workflow; cleanup is blocked.'
+    }
+    Write-StageInfo ("Cluster probe: {0} returned 404; no cluster resource found." -f $clusterId)
+}
+catch {
+    if ($_.Exception.Message -match 'Azure Local cluster exists') { throw }
+    throw
 }
 
-$resources = @(Get-AzResource -ResourceGroupName $ResourceGroupName -ErrorAction Stop)
+try { $resources = @(Get-AzResource -ResourceGroupName $ResourceGroupName -ErrorAction Stop) } catch { throw ("Resource inventory failed: {0}" -f $_.Exception.Message) }
 $resources | Select-Object Name, ResourceType, ResourceId, ResourceGroupName |
     Export-Csv (Join-Path $runRoot 'resources-before.csv') -NoTypeInformation
 
