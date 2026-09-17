@@ -32,8 +32,26 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
-$uiPath = Join-Path $PSScriptRoot 'ui-common.ps1'
-if (Test-Path -LiteralPath $uiPath -PathType Leaf) { . $uiPath }
+Write-Host ("[ZCOFFEE] 07-cleanup-stale-resources.ps1 starting: {0}" -f $PSCommandPath)
+Write-Host ("[ZCOFFEE] PowerShell: {0}" -f $PSVersionTable.PSVersion)
+
+trap {
+    Write-Host ("[ERR] Cleanup failed: {0}" -f $_.Exception.Message) -ForegroundColor Red
+    Write-Host $_.ScriptStackTrace -ForegroundColor DarkRed
+    break
+}
+
+$uiPath = Join-Path $PSScriptRoot '..\ui-common.ps1'
+if (Test-Path -Path $uiPath -PathType Leaf) {
+    . $uiPath
+    Write-Host ("[ZCOFFEE] Loaded shared UI: {0}" -f $uiPath)
+} else {
+    Write-Host ("[WARN] Shared UI not found: {0}" -f $uiPath) -ForegroundColor Yellow
+}
+
+Import-Module Az.Accounts -ErrorAction Stop
+Import-Module Az.Resources -ErrorAction Stop
+Write-Host '[ZCOFFEE] Az modules loaded.'
 
 function Write-StageInfo([string]$Message) {
     if (Get-Command Write-Info -ErrorAction SilentlyContinue) { Write-Info $Message }
@@ -112,7 +130,11 @@ $stamp = Get-Date -Format 'yyyyMMdd-HHmmss'
 $runRoot = Join-Path $logRoot ("cleanup-stale-resources-{0}" -f $stamp)
 New-Item -Path $runRoot -ItemType Directory -Force | Out-Null
 
-$ctx = Get-AzContext -ErrorAction Stop
+$ctx = Get-AzContext -ErrorAction SilentlyContinue
+if ($null -eq $ctx) {
+    throw 'No Az context exists. Connect to Azure before running cleanup.'
+}
+Write-Host ("[INFO] Az context: account={0}; subscription={1}; tenant={2}" -f $ctx.Account.Id, $ctx.Subscription.Id, $ctx.Tenant.Id)
 if (-not $ctx.Subscription -or $ctx.Subscription.Id -ne $SubscriptionId) {
     throw ("Current Az context is not subscription {0}. Connect/select it before running cleanup." -f $SubscriptionId)
 }
